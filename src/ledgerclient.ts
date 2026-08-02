@@ -9,6 +9,7 @@
  */
 
 import { HttpClient, HttpError } from '@cloudsforge/http';
+import { engagementAccount } from '@cloudsforge/contracts-money';
 import type { Actor, EntryKind, LedgerAssetCode } from '@cloudsforge/contracts-money';
 
 export const LEDGER_SCOPES: readonly string[] = Object.freeze(['ledger:post']);
@@ -69,13 +70,51 @@ export interface LedgerClient {
 }
 
 /**
- * The two postings that pay a reward: the platform's promotional expense out, the player's balance
- * in. Balanced by construction — the same number on both sides.
+ * The two postings that pay a reward: the programme's money out, the player's balance in. Balanced
+ * by construction — the same number on both sides.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * **THE DEBIT SIDE IS `engagement:emberkin`, AND MOVING IT THERE FIXED A LIVE COLLISION.**
+ *
+ * This function used to debit `(platform, SHARD, fees)` as type `expense`. `micro-billing`,
+ * `micro-market`, `micro-mint`, `micro-trade` and `micro-wallet` all name that SAME account key as
+ * type `revenue` (market/src/ledgerclient.ts:123, wallet/src/money.ts:145). The ledger's account
+ * key is `(subject, asset_code, purpose)` — nothing else — and `ensureAccount` THROWS
+ * `AccountConflictError` when a caller's stated type disagrees with the row that already exists
+ * (ledger/src/accounts.ts:125). So whichever of us posted second would have had EVERY entry
+ * refused, for as long as the disagreement stood. No suite caught it because each service tests
+ * against its own fake ledger, so nothing in CI ever puts two real services against one real
+ * ledger. `micro-worlds` carried the identical defect in the identical function and was moved off
+ * the same key for the same reason (worlds@cc8f594).
+ *
+ * `revenue` was the correct reading and `expense` was ours to give up: a platform fee line is
+ * income, and `micro-ledger` says so in its own chart — "`platform` is revenue under `fees`,
+ * equity under `treasury` and expense under `payout_due`" (ledger/src/accounts.ts:16-17). But a
+ * reward is not a fee at all, in either direction, so retyping to `revenue` would only have
+ * swapped a collision for a lie. docs/ecosystem/21 §4 already names the right account: "every
+ * grant a service pays out references its engagement account as the debit side", so an auditor
+ * reconstructs the programme from the ledger alone.
+ *
+ * `equity` is load-bearing beyond the collision. The ledger's overdraft trigger exempts `clearing`
+ * and `suspense` and NOT `equity` (ledger/src/migrations.ts, `ledger_assert_no_overdraft`), so a
+ * reward that would take `engagement:emberkin` negative is refused BY THE LEDGER.
+ * `seasons.reward_budget_shards` stays the CAP; the engagement balance is the FUNDING, and the two
+ * are different questions. The account is funded only by operator-approved `engagement.transfer`
+ * actions in `micro-admin-api`.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 export function rewardPostings(input: { readonly subject: string; readonly amount: bigint }): readonly PostingRequest[] {
   return [
     {
-      account: { subject: 'platform', assetCode: 'SHARD', purpose: 'fees', type: 'expense' },
+      // Spelled by @cloudsforge/contracts-money, never here: the account key is
+      // (subject, asset_code, purpose), so a second spelling would be a second account and would
+      // split this programme's ledger in half.
+      account: {
+        subject: engagementAccount('emberkin', 'SHARD').subject,
+        assetCode: 'SHARD',
+        purpose: 'treasury',
+        type: 'equity',
+      },
       direction: 'debit',
       amount: input.amount,
       assetCode: 'SHARD',
