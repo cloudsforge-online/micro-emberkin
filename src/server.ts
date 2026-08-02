@@ -37,7 +37,6 @@ export interface PrincipalVerifier {
   principal(token: string): Promise<Principal>;
 }
 
-export const READ_SCOPE = 'emberkin:read';
 export const WRITE_SCOPE = 'emberkin:write';
 
 /** Billing SKUs whose grant pays a season welcome reward. */
