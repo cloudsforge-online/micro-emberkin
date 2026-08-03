@@ -5,11 +5,18 @@
  * unique) inside the battle transaction. Delivery to worlds is a LEASED JOB, keyed by the
  * achievement id, so a worlds outage delays the badge rather than losing or doubling it, and two
  * workers cannot both deliver one achievement.
+ *
+ * **A delivery has three outcomes, not two.** Worlds declining a badge and this service failing to
+ * reach worlds are different facts, and only the first is safe to stop retrying on. Treating them
+ * as one is what dropped every cross-title badge in the estate; see `worldsclient.ts`.
  */
 
 import type { WorldsClient } from './worldsclient.ts';
-import { WorldsRefusedError, WorldsUnavailableError } from './worldsclient.ts';
-import { TITLE_SCOPE } from './cosmetics.ts';
+import {
+  WorldsMisroutedError,
+  WorldsRefusedError,
+  WorldsUnavailableError,
+} from './worldsclient.ts';
 import type { Logger } from '@cloudsforge/telemetry';
 import type { Db } from './outbox.ts';
 
@@ -53,16 +60,26 @@ export async function deliverAchievement(deps: AchievementDeps, achievementId: s
   try {
     await deps.worlds.postAchievement({
       userId: row.user_id,
-      titleSlug: TITLE_SCOPE,
-      code: row.code,
+      key: row.code,
       name: row.name,
       points: row.points,
       correlationId,
-      // Derived from (user, code): a redelivery posts once.
-      idempotencyKey: `emberkin:achievement:${row.user_id}:${row.code}`,
     });
   } catch (err) {
     if (err instanceof WorldsUnavailableError) throw err; // retry with backoff
+    if (err instanceof WorldsMisroutedError) {
+      // NOT `'refused'`, and this branch is the whole point of the fix. Worlds did not decide
+      // anything: we called it wrongly, so the badge is undelivered rather than declined. Thrown,
+      // so the row keeps `delivered_at = null` and the sweep comes back for it once the wiring is
+      // fixed; logged at `error`, because nothing will fix it on its own. For four months this
+      // fell into the branch below and every cross-title badge in the estate was discarded.
+      deps.logger.error('a badge could not be delivered because this service is wired wrong', {
+        achievementId,
+        status: err.status,
+        err: err.message,
+      });
+      throw err;
+    }
     if (err instanceof WorldsRefusedError) {
       deps.logger.warn('worlds refused an achievement permanently', { achievementId, err: err.message });
       return 'refused';
