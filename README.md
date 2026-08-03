@@ -6,6 +6,8 @@ battle core, content and signature bond system are a behavioural port of
 inside the CloudsForge estate onto worlds, billing, identity and the ledger — without its gameplay
 being colonised by the platform.
 
+Design authority: [`ecosystem/19-new-products.md`](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/19-new-products.md)
+
 This repository is the **game service**: authoritative saves, the deterministic battle engine as a
 TypeScript module, content as canonical JSON with schema tests, and the worlds/billing/ledger
 integration. The Three.js client (`micro-emberkin-web`) is a separate, later repository.
@@ -98,3 +100,10 @@ schema version and refuses to serve below it. Copy `.env.example` to `.env` for 
 - `POST /v1/saves/me/battles` — resolve a battle server-side; idempotent on `Idempotency-Key`
 - `PUT /v1/saves/me/cosmetics` — equip a cosmetic, gated by a billing entitlement, never a stat
 - `GET /v1/saves/me/achievements` · `GET /v1/content/dex`
+
+---
+
+## Provenance
+
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
+human direction and review.
