@@ -17,6 +17,7 @@
  */
 
 import { hostname } from 'node:os';
+import { SecretError, assertGeneratedSecret, parseSecretList as parseGeneratedSecretList } from '@cloudsforge/secrets';
 
 /** This service's own name. A constant — a property of the repository, not the deployment. */
 export const SERVICE = 'emberkin';
@@ -28,18 +29,6 @@ export class EnvError extends Error {
   }
 }
 
-const PLACEHOLDERS = new Set([
-  'changeme',
-  'change_me',
-  'change-me',
-  'placeholder',
-  'secret',
-  'token',
-  'dev-secret',
-  'replace-with-a-real-secret',
-  'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-]);
-
 type Source = Readonly<Record<string, string | undefined>>;
 
 function required(source: Source, name: string): string {
@@ -48,13 +37,105 @@ function required(source: Source, name: string): string {
   return value;
 }
 
-function requiredSecret(source: Source, name: string, minLength = 24): string {
+/**
+ * `@cloudsforge/secrets` raises `SecretError`; this file's contract is that `loadEnv` raises
+ * `EnvError`, and every test and caller in this repository is written to that.
+ *
+ * So a shape failure is re-wrapped rather than rethrown, and the message is carried across
+ * VERBATIM: it already names the variable and the command that fixes it, and by construction it
+ * contains no part of the value. Only the class changes, so there is one thing to catch here and
+ * nothing to re-derive by matching on text.
+ */
+function asEnvError(err: unknown): never {
+  throw err instanceof SecretError ? new EnvError(err.message) : err;
+}
+
+/**
+ * The estate's shared event-bus HMAC key, held to a SHAPE rather than to a deny-list.
+ *
+ * THE LOCAL `requiredSecret` AND ITS `PLACEHOLDERS` SET ARE GONE RATHER THAN KEPT IN FRONT, and
+ * this is micro-org #212. They asked two questions — is the value one of nine exact strings, and
+ * is it at least 24 characters — and `estate-only-outbox-secret-00000000000000` answered both
+ * correctly: it was on nobody's list and it was 40 characters. That value sat on 54 lines of a
+ * PUBLIC compose file and was live on 44 containers across both networks. A MEMBERSHIP TEST CAN
+ * ONLY CATCH PLACEHOLDERS SOMEBODY ALREADY IMAGINED, so it fails in exactly the case that matters.
+ *
+ * `assertGeneratedSecret` measures instead: the base64 or hex alphabet and nothing else, at least
+ * 32 decoded BYTES rather than 24 keystrokes, and a MEASURED Shannon entropy floor per alphabet.
+ * `'x'.repeat(24)` is 24 characters and near-zero entropy, and is refused. There is no NODE_ENV
+ * exemption and no escape hatch, so CI generates a real value per run rather than being let
+ * through.
+ *
+ * It matters here specifically: this service VERIFIES inbound deliveries on `POST /v1/events` with
+ * this key, and one of the topics that arrive there is `identity.user.deleted`. A forgeable key is
+ * an anonymous erasure endpoint, and a missed delivery is an erasure obligation quietly not met.
+ *
+ * Measured live on 2026-08-06, both networks: 64 characters, base64, 48 bytes, 5.27 bits per
+ * character — `openssl rand -base64 48`, exactly what the runbook says to run. So this refuses
+ * nothing that is currently deployed.
+ *
+ * `required` in front of it and nothing else: the deleted checks were a strict subset of the
+ * stronger ones, and running them first would answer a 40-character placeholder with "must be at
+ * least 24 characters" — true, useless, and pointing the operator at the wrong property.
+ */
+function requiredSigningSecret(source: Source, name: string): string {
   const value = required(source, name);
-  if (PLACEHOLDERS.has(value.toLowerCase())) {
-    throw new EnvError(`${name} is set to a known placeholder — generate a real secret`);
+  try {
+    assertGeneratedSecret(name, value);
+  } catch (err) {
+    asEnvError(err);
   }
-  if (value.length < minLength) {
-    throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`);
+  return value;
+}
+
+/**
+ * A JWT's first two segments. Matched on SHAPE, not decoded — this is a refusal, not a parse.
+ */
+const JWT_SHAPE = /^ey[A-Za-z0-9_-]*\./;
+
+/**
+ * A MINTED TOKEN, which is a fourth thing and not one of `@cloudsforge/secrets`' three classes.
+ *
+ * ── WHY THIS SLOT IS NOT `assertServiceCredential`, WHICH IS THE OBVIOUS ANSWER ────────────────
+ *
+ * Because `index.ts:60` is `const token = (): string => env.serviceToken` — the value is PRESENTED
+ * as a bearer, verbatim, with no exchange. So it must be a ten-minute JWT from
+ * `POST /service-tokens`, and `estate-bootstrap.sh` mints it into the CREDENTIALS list for exactly
+ * that reason. `EMBERKIN_IDENTITY_CREDENTIAL` is also minted, by §5b, and sits in `tokens.env`
+ * looking like the obvious answer; handing it here would send all three upstreams a Bearer that is
+ * not a JWT and earn a 401 with nothing in either log naming the cause. THE GUARD CLASS IS NOT
+ * PREDICTABLE FROM THE VARIABLE'S NAME, and it was measured rather than inferred — 2026-08-06, a
+ * 698-character JWT on both networks.
+ *
+ * ── SO THIS IS A STOPGAP, AND ITS END IS NAMED ────────────────────────────────────────────────
+ *
+ * A ten-minute bearer read once at boot is micro-org #197/#222: the process authenticates for the
+ * first ten minutes of its life and presents a corpse afterwards, with `/livez` green throughout
+ * because it verifies nothing. The remedy is the one community 1.2.0, tessera 1.2.0 and admin-api
+ * 1.3.0 already took — `ServiceTokenProvider` exchanging a long-lived credential and re-minting
+ * before expiry — and it is filed rather than done here, because it is a different change from
+ * this one and requires the compose block to stop passing the token.
+ *
+ * WHAT THIS GUARD BUYS TODAY, WHICH IS NOT NOTHING. The compose default when the bootstrap has not
+ * run is `${EMBERKIN_SERVICE_TOKEN:-estate-placeholder-token-0000000000000000}` — 40 characters,
+ * on nobody's deny-list, and the deleted guard passed it. A service booting on that 401s all three
+ * upstreams silently. A JWT is generated by identity and cannot be typed by somebody in a hurry,
+ * so requiring the shape refuses every placeholder this estate has ever written while accepting
+ * exactly what the compose file says belongs here.
+ *
+ * NO EXPIRY CHECK, and that is deliberate rather than forgotten. `exp` is in the past on every
+ * restart more than ten minutes after a bootstrap, so enforcing it would crash-loop this service
+ * and `emberkin-migrate` with it. A boot check cannot fix a lifetime problem; exchange-and-refresh
+ * can, and that is what #222 is for.
+ */
+function requiredMintedToken(source: Source, name: string): string {
+  const value = required(source, name);
+  if (!JWT_SHAPE.test(value)) {
+    throw new EnvError(
+      `${name} is not a minted service token — identity issues these as a JWT and this service ` +
+        `presents the value verbatim as a Bearer, so a typed placeholder here 401s every upstream ` +
+        `silently. Mint one with: deploy/scripts/estate-bootstrap.sh`,
+    );
   }
   return value;
 }
@@ -73,30 +154,25 @@ function optional(source: Source, name: string, fallback: string): string {
  * refused — and one of the two topics this service consumes is `identity.user.deleted`, so a silent
  * partition is an erasure obligation quietly not met.
  *
- * Every entry is held to exactly the bar `requiredSecret` holds a single one to: a list is not a
- * way to smuggle in a value that would be refused on its own. The parser is the house pattern —
- * `trade/src/env.ts:112` and `settlement/src/env.ts:433` carry the same shape.
+ * Every entry is held to exactly the bar a single secret is held to, and since micro-org #212 that
+ * bar is `assertGeneratedSecret` rather than a deny-list plus a 24-character floor. A LIST IS NOT A
+ * PLACE WHERE THE RULE RELAXES: the OUTGOING key is the one an attacker already has if it leaked,
+ * and "just for the drain" is exactly how a placeholder survives a rotation meant to remove it.
+ *
+ * THE BODY OF THIS FUNCTION IS GONE, not reimplemented. It was the eleventh copy of the same
+ * parser in the estate — `trade/src/env.ts:112` and `settlement/src/env.ts:433` carried the others
+ * — and eleven copies of a check are eleven chances for one of them to drift. `parseSecretList` in
+ * `@cloudsforge/secrets` is the one copy, and it keeps the duplicate check this copy had.
+ *
+ * The signature is preserved because callers and tests in this repository are written to it; only
+ * the argument order differs from the shared function, which takes the NAME first.
  */
-export function parseSecretList(raw: string, name: string, minLength = 24): readonly string[] {
-  const entries = raw
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-  if (entries.length === 0) throw new EnvError(`${name} is required — at least one secret`);
-  for (const entry of entries) {
-    if (PLACEHOLDERS.has(entry.toLowerCase())) {
-      throw new EnvError(`${name} contains a known placeholder — generate real secrets`);
-    }
-    if (entry.length < minLength) {
-      throw new EnvError(`${name} entries must each be at least ${minLength} characters`);
-    }
+export function parseSecretList(raw: string, name: string): readonly string[] {
+  try {
+    return parseGeneratedSecretList(name, raw);
+  } catch (err) {
+    asEnvError(err);
   }
-  if (new Set(entries).size !== entries.length) {
-    // A duplicated secret makes the "which key verified this" answer ambiguous, and that answer is
-    // what tells an operator whether a rotation has finished and the old key can be dropped.
-    throw new EnvError(`${name} lists the same secret twice`);
-  }
-  return Object.freeze(entries);
 }
 
 function integer(source: Source, name: string, fallback: number, min: number, max: number): number {
@@ -148,7 +224,13 @@ export interface Env {
   readonly billingUrl: string;
   /** Worlds owns the shared profile + achievements; this service posts to it via the bridge. */
   readonly worldsUrl: string;
-  /** The scoped service credential. Not shared: SD-05. Carries billing:read, ledger:post, worlds:write. */
+  /**
+   * The scoped service TOKEN — a ten-minute JWT, not a credential, and the distinction is the whole
+   * of micro-org #197/#222. `index.ts:60` presents it verbatim as a Bearer with no exchange, so it
+   * must be what `POST /service-tokens` mints. Not shared: SD-05. Carries billing:read,
+   * ledger:post, worlds:write. See `requiredMintedToken` for the guard and for why this slot is
+   * being retired rather than made stricter.
+   */
   readonly serviceToken: string;
   readonly upstreamDeadlineMs: number;
 
@@ -166,7 +248,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
   const budget = shards(source, 'EMBERKIN_SEASON_REWARD_BUDGET_SHARDS', 100_000n);
   if (budget <= 0n) throw new EnvError('EMBERKIN_SEASON_REWARD_BUDGET_SHARDS must be positive');
   // Read before the object literal because the accept list falls back to it.
-  const outboxSigningSecret = requiredSecret(source, 'OUTBOX_SIGNING_SECRET');
+  const outboxSigningSecret = requiredSigningSecret(source, 'OUTBOX_SIGNING_SECRET');
 
   return {
     port: integer(source, 'PORT', 4100, 1, 65_535),
@@ -187,7 +269,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     ledgerUrl: required(source, 'LEDGER_URL'),
     billingUrl: required(source, 'BILLING_URL'),
     worldsUrl: required(source, 'WORLDS_URL'),
-    serviceToken: requiredSecret(source, 'EMBERKIN_SERVICE_TOKEN'),
+    serviceToken: requiredMintedToken(source, 'EMBERKIN_SERVICE_TOKEN'),
     upstreamDeadlineMs: integer(source, 'EMBERKIN_UPSTREAM_DEADLINE_MS', 5_000, 100, 60_000),
 
     seasonRewardBudgetShards: budget,

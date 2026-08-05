@@ -38,16 +38,28 @@ jobs:
       port: 4100
       # The image startup smoke test boots the real service, and `env.ts` validates its
       # configuration at import — so the container needs the variables it declares, not just a
-      # database. CI-only NON-secrets: throwaway tokens that clear a length check, URLs that are
-      # never dialled because /livez needs no upstream. Never a real credential.
+      # database. URLs that are never dialled because /livez needs no upstream, and per-run key
+      # material. Never a real credential.
+      #
+      # THE TWO LITERALS THAT USED TO SIT HERE ARE GONE, and neither could be kept (micro-org
+      # #212). `OUTBOX_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000` is refused by
+      # `assertGeneratedSecret`: it normalises to a string containing `cionly` and `notareal`, both
+      # markers, and it is hyphenated prose rather than base64. `EMBERKIN_SERVICE_TOKEN=ci-only-
+      # not-a-real-token-0000000000000` is refused for a different reason — `index.ts:60` presents
+      # that value verbatim as a Bearer, so the slot takes a minted JWT and a typed string is not
+      # one.
+      #
+      # NO GUARD WAS WEAKENED TO MAKE THIS PASS. CI does not need a WEAK secret, it needs A secret:
+      # nothing in the smoke test verifies a signature or authenticates to anything, so both values
+      # are generated per run by service-ci.yml and thrown away.
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4001
-        OUTBOX_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000
+        OUTBOX_SIGNING_SECRET=@generate
         LEDGER_URL=http://127.0.0.1:4007
         BILLING_URL=http://127.0.0.1:4009
         WORLDS_URL=http://127.0.0.1:4000
-        EMBERKIN_SERVICE_TOKEN=ci-only-not-a-real-token-0000000000000
+        EMBERKIN_SERVICE_TOKEN=@token
     secrets:
       # @cloudsforge/* resolves via link:../runtime, so the workflow checks out micro-runtime
       # and micro-contracts as siblings — both private, hence a contents:read token.
@@ -77,12 +89,36 @@ jobs:
       EMBERKIN_DATABASE_URL: postgres://emberkin:emberkin@127.0.0.1:5432/emberkin_test
       IDENTITY_JWKS_URL: http://127.0.0.1:4001/.well-known/jwks.json
       IDENTITY_ISSUER: http://127.0.0.1:4001
-      OUTBOX_SIGNING_SECRET: ci-only-not-a-real-secret-000000000000
       LEDGER_URL: http://127.0.0.1:4007
       BILLING_URL: http://127.0.0.1:4009
       WORLDS_URL: http://127.0.0.1:4000
-      EMBERKIN_SERVICE_TOKEN: ci-only-not-a-real-token-0000000000000
+      # OUTBOX_SIGNING_SECRET and EMBERKIN_SERVICE_TOKEN are deliberately NOT here — see the first
+      # step below.
     steps:
+      # THE KEY MATERIAL IS GENERATED, not written into the mapping above.
+      #
+      # `@generate` and `@token` are features of service-ci.yml's `smoke-env` input and nothing
+      # substitutes them in a bespoke job's `env:`, so a literal here would reach the migrator as
+      # written — and the boot guard refuses both literals that used to sit there (micro-org #212).
+      # `src/migrator.ts` imports `src/env.ts`, so this job validates them too and would exit 1
+      # before touching the schema.
+      #
+      # Generated per run and thrown away. Masked before either is written, so a later step that
+      # dumps its environment cannot put one in the log; nothing here ever prints them.
+      - name: Real key material, for this run only
+        run: |
+          set -euo pipefail
+          secret="$(openssl rand -base64 48)"
+          echo "::add-mask::$secret"
+          echo "OUTBOX_SIGNING_SECRET=$secret" >> "$GITHUB_ENV"
+          # The JWT SHAPE this slot demands: two base64url segments and a dot. Unsigned, and
+          # nothing in this job verifies it — the migrator dials no upstream at all.
+          jwt_h=$(printf '{"alg":"EdDSA","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+          jwt_p=$(printf '{"sub":"ci","iss":"ci","exp":0}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+          jwt_s=$(openssl rand -base64 33 | tr '+/' '-_' | tr -d '=\n' | cut -c1-43)
+          token="${jwt_h}.${jwt_p}.${jwt_s}"
+          echo "::add-mask::$token"
+          echo "EMBERKIN_SERVICE_TOKEN=$token" >> "$GITHUB_ENV"
       # Temporary: the three checkouts exist only because the runtime and contracts packages are
       # unpublished. On publish this collapses to one checkout.
       - uses: actions/checkout@v4

@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/emberkin",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "The second Forge Worlds title. Emberkin (subtitle Resonance) is a monster-collecting RPG ported from KINDRED: Resonance: authoritative saves, a deterministic TypeScript battle engine that replays a C#-recorded corpus seed-for-seed, content as canonical JSON with schema tests, and worlds integration (achievements, cosmetic entitlement bridge) — no gameplay value on-chain, no pay-to-win.",
   "license": "MIT",
@@ -40,6 +40,7 @@
     "@cloudsforge/http": "link:../runtime/packages/http",
     "@cloudsforge/jobs": "link:../runtime/packages/jobs",
     "@cloudsforge/lifecycle": "link:../runtime/packages/lifecycle",
+    "@cloudsforge/secrets": "link:../runtime/packages/secrets",
     "@cloudsforge/telemetry": "link:../runtime/packages/telemetry",
     "postgres": "^3.4.5",
     "tsx": "^4.19.2"
