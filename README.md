@@ -78,6 +78,27 @@ event id); the inbound `POST /v1/events` webhook is signature-checked before it 
 background work — the relay, achievement delivery, season rollover, the season welcome reward — is a
 **leased job** claimed `FOR UPDATE SKIP LOCKED`; there is no `setInterval`.
 
+### Event signatures
+
+The scheme is **`@cloudsforge/contracts-events`'**, imported rather than copied:
+`cf-signature: t=<seconds>,v1=<hmac over "<seconds>.<body>">`. This file used to carry a local copy
+that signed `sha256=<hmac over the body>` under `x-cloudsforge-signature`, which nothing in the
+estate sends or accepts — so every inbound delivery answered `403 bad_signature` (measured on a live
+estate: one account deletion, 358 relay retries, a green `/livez` throughout) and every event this
+service emitted was refused by its consumers for the mirror-image reason. Both directions moved.
+
+Inbound verification has a **second, legacy arm**, and it is deliberate: this service's two
+producers are on two schemes. `identity` sends the contract's signature; `billing` still sends the
+legacy one (`billing/src/outbox.ts:308`, on purpose — "moving the producer half is a coordinated
+change across those consumers"). Verifying only the contract's way would fix erasure and break the
+season pass in the same commit. `emberkin_events_accepted_total{scheme="legacy"}` reaching zero is
+what says billing has migrated and the arm can be deleted; `outbox.test.ts` pins it until then.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `OUTBOX_SIGNING_SECRET` | — | **required, ≥24 chars, a single key.** Signs what this service emits. It stays one value: signing under two keys at once is not a rotation, it is a fork, and it doubles every subscriber's verification work. |
+| `OUTBOX_ACCEPT_SECRETS` | `[OUTBOX_SIGNING_SECRET]` | Comma-separated, **newest first** — every key an inbound delivery may have been signed with, under *both* arms. A list rather than a value because the estate's outbox key is one secret shared by 24 services, and swapping it partitions delivery: whichever end moves first has everything between them refused until the other catches up. So the rotation is a window — add the new key at the front, restart, move the producers, then drop the old one. Unset it is today's behaviour byte for byte, which is what lets the estate rotate one service at a time rather than on a flag day. Each entry faces the signing secret's bar, and a repeat is refused at boot. |
+
 ## Running it
 
 ```bash
@@ -99,7 +120,8 @@ schema version and refuses to serve below it. Copy `.env.example` to `.env` for 
 - `GET /livez` · `GET /readyz` · `GET /metrics`
 - `POST /v1/events` — signed inbound webhook. Two topics: `billing.entitlement.granted`
   (season-pass grant → leased reward job) and `identity.user.deleted` (erasure — see below). Any
-  other topic is 202'd and ignored; a bad signature is **403**, checked before the body is parsed.
+  other topic is 202'd and ignored; a bad signature is **403**, checked before the body is parsed —
+  not 401, because the MAC is the credential and there is no token for a caller to go and find.
 - `POST /v1/saves` — start a game (idempotent per account) · `GET /v1/saves/me`
 - `POST /v1/saves/me/battles` — resolve a battle server-side; idempotent on `Idempotency-Key`
 - `PUT /v1/saves/me/cosmetics` — equip a cosmetic, gated by a billing entitlement, never a stat

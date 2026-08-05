@@ -30,6 +30,7 @@ import {
   quietLogger,
   testMetrics,
   signedEvent,
+  CONTRACT_SIGNATURE_HEADER,
   ALICE,
   BOB,
 } from './testsupport.ts';
@@ -66,7 +67,7 @@ before(async () => {
     data,
     billing: fakeBilling(),
     queue: { enqueue: async (o) => void enqueued.push({ kind: o.kind, key: o.key }) },
-    eventSigningSecret: SECRET,
+    eventAcceptSecrets: [SECRET],
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   lifecycle.markReady();
@@ -93,7 +94,7 @@ async function postEvent(envelope: Record<string, unknown>): Promise<Response> {
   const { body, signature } = await signedEvent(SECRET, envelope);
   return fetch(`${base}/v1/events`, {
     method: 'POST',
-    headers: { 'x-cloudsforge-signature': signature, 'content-type': 'application/json' },
+    headers: { [CONTRACT_SIGNATURE_HEADER]: signature, 'content-type': 'application/json' },
     body,
   });
 }

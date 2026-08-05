@@ -102,7 +102,8 @@ const server = createServer({
   data,
   billing,
   queue,
-  eventSigningSecret: env.outboxSigningSecret,
+  // Absent `OUTBOX_ACCEPT_SECRETS` this is `[env.outboxSigningSecret]`, i.e. unchanged.
+  eventAcceptSecrets: env.acceptSecrets,
   beforeScrape: async () => {
     const stats = await queue.stats();
     metrics.set('jobs_pending', stats.pending);

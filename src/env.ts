@@ -64,6 +64,41 @@ function optional(source: Source, name: string, fallback: string): string {
   return value && value.length > 0 ? value : fallback;
 }
 
+/**
+ * A comma-separated list of secrets, newest first.
+ *
+ * A LIST, not a value, because rotating `OUTBOX_SIGNING_SECRET` without an overlap window would
+ * require every producer in the estate to change secret in the same instant this service does, and
+ * that instant does not exist during a rolling deploy. A producer that moved first would simply be
+ * refused — and one of the two topics this service consumes is `identity.user.deleted`, so a silent
+ * partition is an erasure obligation quietly not met.
+ *
+ * Every entry is held to exactly the bar `requiredSecret` holds a single one to: a list is not a
+ * way to smuggle in a value that would be refused on its own. The parser is the house pattern —
+ * `trade/src/env.ts:112` and `settlement/src/env.ts:433` carry the same shape.
+ */
+export function parseSecretList(raw: string, name: string, minLength = 24): readonly string[] {
+  const entries = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (entries.length === 0) throw new EnvError(`${name} is required — at least one secret`);
+  for (const entry of entries) {
+    if (PLACEHOLDERS.has(entry.toLowerCase())) {
+      throw new EnvError(`${name} contains a known placeholder — generate real secrets`);
+    }
+    if (entry.length < minLength) {
+      throw new EnvError(`${name} entries must each be at least ${minLength} characters`);
+    }
+  }
+  if (new Set(entries).size !== entries.length) {
+    // A duplicated secret makes the "which key verified this" answer ambiguous, and that answer is
+    // what tells an operator whether a rotation has finished and the old key can be dropped.
+    throw new EnvError(`${name} lists the same secret twice`);
+  }
+  return Object.freeze(entries);
+}
+
 function integer(source: Source, name: string, fallback: number, min: number, max: number): number {
   const raw = source[name]?.trim();
   if (!raw) return fallback;
@@ -91,8 +126,22 @@ export interface Env {
   readonly databasePoolMax: number;
   readonly identityJwksUrl: string;
   readonly identityIssuer: string;
-  /** HMAC key for outbound event signatures AND for verifying inbound ones (POST /v1/events). */
+  /**
+   * HMAC key for outbound event signatures, so a subscriber can prove an event came from us.
+   * Exactly one, always: a producer signing under two keys at once has not rotated, it has forked,
+   * and it doubles every subscriber's verification work for no gain.
+   */
   readonly outboxSigningSecret: string;
+  /**
+   * The secrets `POST /v1/events` will ACCEPT, newest first, under BOTH inbound schemes.
+   *
+   * Defaults to `[outboxSigningSecret]` when `OUTBOX_ACCEPT_SECRETS` is unset, so a deploy that
+   * does not set it behaves exactly as it does today, byte for byte. That is deliberate: it makes
+   * shipping this a no-op, which is what lets the estate's shared key be rotated one service at a
+   * time afterwards rather than on a flag day. See `outbox.ts`'s `verifyInbound` for why a single
+   * value cannot be rotated at all.
+   */
+  readonly acceptSecrets: readonly string[];
   readonly instanceId: string;
 
   readonly ledgerUrl: string;
@@ -116,6 +165,8 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
   }
   const budget = shards(source, 'EMBERKIN_SEASON_REWARD_BUDGET_SHARDS', 100_000n);
   if (budget <= 0n) throw new EnvError('EMBERKIN_SEASON_REWARD_BUDGET_SHARDS must be positive');
+  // Read before the object literal because the accept list falls back to it.
+  const outboxSigningSecret = requiredSecret(source, 'OUTBOX_SIGNING_SECRET');
 
   return {
     port: integer(source, 'PORT', 4100, 1, 65_535),
@@ -126,7 +177,11 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     databasePoolMax: integer(source, 'EMBERKIN_DATABASE_POOL_MAX', 10, 1, 100),
     identityJwksUrl: required(source, 'IDENTITY_JWKS_URL'),
     identityIssuer: required(source, 'IDENTITY_ISSUER'),
-    outboxSigningSecret: requiredSecret(source, 'OUTBOX_SIGNING_SECRET'),
+    outboxSigningSecret,
+    acceptSecrets: parseSecretList(
+      optional(source, 'OUTBOX_ACCEPT_SECRETS', outboxSigningSecret),
+      'OUTBOX_ACCEPT_SECRETS',
+    ),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
 
     ledgerUrl: required(source, 'LEDGER_URL'),

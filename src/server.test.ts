@@ -23,6 +23,7 @@ import {
   quietLogger,
   testMetrics,
   signedEvent,
+  CONTRACT_SIGNATURE_HEADER,
   ALICE,
 } from './testsupport.ts';
 
@@ -59,7 +60,7 @@ before(async () => {
     data,
     billing,
     queue: { enqueue: async (o) => void enqueued.push({ kind: o.kind, key: o.key }) },
-    eventSigningSecret: SECRET,
+    eventAcceptSecrets: [SECRET],
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   lifecycle.markReady();
@@ -178,14 +179,14 @@ test('server: the webhook rejects a bad signature and dedupes a valid one', { sk
   // go and find a token that does not exist. See the comment at the check in server.ts.
   assert.equal(bad.status, 403);
 
-  const good = await fetch(`${base}/v1/events`, { method: 'POST', headers: { 'x-cloudsforge-signature': signature, 'content-type': 'application/json' }, body });
+  const good = await fetch(`${base}/v1/events`, { method: 'POST', headers: { [CONTRACT_SIGNATURE_HEADER]: signature, 'content-type': 'application/json' }, body });
   assert.equal(good.status, 202);
   const accepted = (await good.json()) as { status: string };
   assert.equal(accepted.status, 'accepted');
   assert.ok(enqueued.some((e) => e.kind === SEASON_REWARD_KIND && e.key === 'ent-9'), 'a season reward job must be enqueued');
 
   // Same event id again: deduped by the inbox.
-  const dup = await fetch(`${base}/v1/events`, { method: 'POST', headers: { 'x-cloudsforge-signature': signature, 'content-type': 'application/json' }, body });
+  const dup = await fetch(`${base}/v1/events`, { method: 'POST', headers: { [CONTRACT_SIGNATURE_HEADER]: signature, 'content-type': 'application/json' }, body });
   assert.equal(dup.status, 202);
   const dupBody = (await dup.json()) as { status: string };
   assert.equal(dupBody.status, 'duplicate');

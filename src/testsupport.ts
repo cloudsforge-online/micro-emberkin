@@ -351,9 +351,20 @@ export function asDb(sql: postgres.Sql): Db {
   return sql as unknown as Db;
 }
 
-/** Sign an envelope the way a producer's relay would, for the inbound-webhook tests. */
+/**
+ * Sign an envelope the way a producer's relay would, for the inbound-webhook tests.
+ *
+ * `signDelivery` comes from `@cloudsforge/contracts-events` DIRECTLY, not from this repository's
+ * `outbox.ts` wrapper and above all not from a re-implementation of the HMAC here. That is the
+ * whole point: the drift this fixture now guards against was a local copy of the scheme, and a test
+ * that carries its own copy agrees with a wrong implementation instead of catching it. The header
+ * name is the contract's too — see `CONTRACT_SIGNATURE_HEADER`.
+ */
 export async function signedEvent(secret: string, envelope: Record<string, unknown>): Promise<{ body: string; signature: string }> {
-  const { signEvent } = await import('./outbox.ts');
+  const { signDelivery } = await import('@cloudsforge/contracts-events');
   const body = JSON.stringify(envelope);
-  return { body, signature: signEvent(body, secret) };
+  return { body, signature: signDelivery(body, secret) };
 }
+
+/** Re-exported so a test never spells `cf-signature` as a literal and drifts from the contract. */
+export { SIGNATURE_HEADER as CONTRACT_SIGNATURE_HEADER } from '@cloudsforge/contracts-events';

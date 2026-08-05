@@ -19,6 +19,12 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
+import {
+  EVENT_ID_HEADER,
+  SIGNATURE_HEADER,
+  signDelivery,
+  verifyDelivery,
+} from '@cloudsforge/contracts-events'
 import { HttpClient } from '@cloudsforge/http'
 import type { Logger } from '@cloudsforge/telemetry'
 import type { Handler } from '@cloudsforge/jobs'
@@ -98,20 +104,131 @@ export async function withOutbox<T>(
 
 /* ------------------------------------------------------------------------ signing */
 
-const SIGNATURE_HEADER = 'x-cloudsforge-signature'
-
-/** `sha256=<hex>` over the exact bytes sent, so a subscriber verifies before parsing. */
+/**
+ * **THE CONTRACT SIGNS, NOT THIS FILE.**
+ *
+ * This was a local implementation — `sha256=<hmac over the body>` under a locally-declared
+ * `x-cloudsforge-signature` — and the §3.3p repair found five producers carrying the same drifted
+ * copy. `@cloudsforge/contracts-events` signs `t=<seconds>,v1=<hmac over "<seconds>.<body>">`
+ * under `cf-signature`, and every consumer that imports the contract verifies exactly that.
+ *
+ * The drift was measured on a live estate rather than reasoned about: a real account deletion put
+ * `identity.user.deleted` on this service's `POST /v1/events` and every attempt answered
+ * `403 bad_signature`, with identity's relay retrying 358 times against a green `/livez`. Both
+ * directions were broken by the same line — nothing this service emitted could be verified by a
+ * contract-following consumer either, so both halves move here.
+ *
+ * The exported names stay, so no call site has to change; the implementations are the contract's,
+ * so they cannot drift again. The scheme is also strictly stronger than what it replaces: the
+ * timestamp is inside the signed message, so a captured delivery stops being a lasting credential
+ * after `DELIVERY_TOLERANCE_MS`.
+ */
 export function signEvent(body: string, secret: string): string {
-  return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`
+  return signDelivery(body, secret)
 }
 
-/** Timing-safe, because a byte-at-a-time comparison of a MAC is a byte-at-a-time forgery oracle. */
-export function verifyEventSignature(body: string, secret: string, presented: string): boolean {
-  const expected = Buffer.from(signEvent(body, secret))
+/**
+ * Verify under the CONTRACT's scheme alone.
+ *
+ * `secrets` may be a list — see `verifyInbound` for why acceptance is a list and signing is not.
+ * The candidates go to `verifyDelivery` in one call rather than one at a time: the contract
+ * already loops them with the same timing-safe comparison, and the freshness window lives there
+ * too. A local re-implementation is precisely what drifted.
+ */
+export function verifyEventSignature(
+  body: string,
+  secrets: string | readonly string[],
+  presented: string,
+): boolean {
+  if (presented.length === 0) return false
+  return verifyDelivery(body, presented, secrets).ok
+}
+
+/* ------------------------------------------------------- the inbound seam */
+
+/**
+ * The header `micro-billing`'s relay still signs under. Deleted with `verifyInbound`'s legacy arm.
+ *
+ * There is no matching legacy event-id constant, because this route never reads one: the event id
+ * comes from the envelope's own `id` field, which is what `withInbox` dedupes on under both schemes.
+ */
+export const LEGACY_SIGNATURE_HEADER = 'x-cloudsforge-signature'
+
+/** `sha256=<hex>` over the body, with no timestamp. The scheme this repository used to sign with. */
+function verifyLegacyDelivery(body: string, secret: string, presented: string): boolean {
+  const expected = Buffer.from(`sha256=${createHmac('sha256', secret).update(body).digest('hex')}`)
   const actual = Buffer.from(presented)
+  // Length first: `timingSafeEqual` throws on a mismatch, and a digest length is public knowledge.
   if (expected.length !== actual.length) return false
   return timingSafeEqual(expected, actual)
 }
+
+export type InboundScheme = 'contract' | 'legacy'
+
+/**
+ * Verify a delivery this service RECEIVES, under either scheme, and say which one matched.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * **THIS IS A MIGRATION, AND IT IS DELIBERATELY ASYMMETRIC WITH WHAT THIS SERVICE SENDS.**
+ *
+ * The producer half above is unconditional — everything this service emits is signed the
+ * contract's way. The CONSUMER half cannot be, and the reason is a fact about another repository
+ * rather than a preference. This service subscribes to two topics and they are not on the same
+ * scheme:
+ *
+ *   - `identity.user.deleted` — `identity/src/outbox.ts:48,325` imports `signDelivery` and sends
+ *     `cf-signature`. The CONTRACT arm is what this one needs, and nothing else will do.
+ *   - `billing.entitlement.granted` — `billing/src/outbox.ts:109,308` still sends a local
+ *     `x-cloudsforge-signature: sha256=<hmac over body>`, and says so on purpose: "moving the
+ *     producer half is a coordinated change across those consumers".
+ *
+ * Verifying only the contract's way would fix the erasure path and break the season-pass path in
+ * the same commit — a 403 on every entitlement grant, retried for ever, which is the same outage
+ * being repaired here wearing the other topic's name.
+ *
+ * **THE LEGACY ARM IS NOT A WEAKENING.** It is the same HMAC over the same body under the same
+ * secret — the property in force today, unchanged. What it lacks is the contract's timestamp
+ * binding, so a captured delivery stays replayable; and a replay is already a no-op here, because
+ * `withInbox` dedupes on `(topic, event_id)` and a redelivered grant must not pay a second reward.
+ * So the exposure the legacy arm leaves is exactly the one the inbox already closes.
+ *
+ * **WHAT DELETES IT.** `micro-billing`'s relay adopting `signDelivery`. `outbox.test.ts` asserts
+ * the legacy arm still verifies, so it cannot be removed silently while billing still needs it —
+ * and the scheme is REPORTED on every accepted delivery, so an operator can watch the legacy count
+ * reach zero before anyone deletes anything, rather than deleting on a belief.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * **`secrets` IS A LIST, AND BOTH ARMS TRY ALL OF IT.** `OUTBOX_SIGNING_SECRET` is one HMAC key
+ * shared by 24 services, and a shared key cannot be rotated by swapping it: whichever end moves
+ * first has every delivery between them refused until the other catches up, and the failure does
+ * not announce itself — delivery partitions, and the symptom reads as a secret mismatch rather
+ * than as a deploy ordering problem. Widening only the contract arm would be that same partition
+ * wearing a disguise, because the paragraphs above say billing is still on the legacy scheme, so
+ * the legacy arm is a live path too.
+ *
+ * The contract arm hands the array straight to `verifyDelivery`. The legacy arm loops here because
+ * `verifyLegacyDelivery` is local, and it does NOT short-circuit: every comparison in it is
+ * timing-safe and length-checked, so trying them all costs microseconds and leaks nothing beyond a
+ * public digest length.
+ */
+export function verifyInbound(
+  body: string,
+  secrets: string | readonly string[],
+  headers: { readonly contract: string; readonly legacy: string },
+): InboundScheme | null {
+  if (headers.contract.length > 0 && verifyDelivery(body, headers.contract, secrets).ok) {
+    return 'contract'
+  }
+  if (headers.legacy.length > 0) {
+    const candidates = typeof secrets === 'string' ? [secrets] : secrets
+    for (const candidate of candidates) {
+      if (verifyLegacyDelivery(body, candidate, headers.legacy)) return 'legacy'
+    }
+  }
+  return null
+}
+
+export { EVENT_ID_HEADER, SIGNATURE_HEADER }
 
 /* ------------------------------------------------------------------------ relay */
 
@@ -263,7 +380,10 @@ async function deliver(
       // The event id is the idempotency key, which is what makes this POST safe to retry and is
       // the same value the subscriber dedupes on.
       idempotencyKey: envelope.id,
-      headers: { [SIGNATURE_HEADER]: signature, 'x-event-id': envelope.id },
+      // Both header names are the CONTRACT's exported constants. `'x-event-id'` was a literal
+      // here and `EVENT_ID_HEADER` is `cf-event-id`, so a consumer reading the contract's name
+      // found nothing — the same class of drift as the signature scheme, one field along.
+      headers: { [SIGNATURE_HEADER]: signature, [EVENT_ID_HEADER]: envelope.id },
       ...(envelope.correlationId ? { requestId: envelope.correlationId } : {}),
     })
     await deps.sql`

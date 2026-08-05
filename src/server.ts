@@ -6,10 +6,15 @@
  *
  * `POST /v1/events` is SIGNATURE-CHECKED BEFORE IT IS PARSED. An event webhook with no MAC lets
  * anyone who can reach the port assert a customer bought a season pass and get the reward paid, so
- * the body is verified against `OUTBOX_SIGNING_SECRET` over the exact bytes received, with a
+ * the body is verified against `OUTBOX_ACCEPT_SECRETS` over the exact bytes received, with a
  * timing-safe comparison, before `JSON.parse`. The handler then dedupes on the source event id via
  * `withInbox` and enqueues a leased reward job — it never posts to the ledger inline, so a ledger
  * outage cannot make the producer's relay redeliver.
+ *
+ * The SCHEME is `@cloudsforge/contracts-events`', not this repository's. It used to be a local
+ * `sha256=<hmac>` under a locally-spelled header, which no producer in the estate sends, so every
+ * inbound delivery answered 403 and every event this service emitted was refused by its consumers.
+ * `outbox.ts` holds the measurement and the reason there is still a second, legacy arm.
  *
  * It serves TWO topics on that one route, `SUBSCRIBED_TOPICS`: `billing.entitlement.granted` and
  * `identity.user.deleted` (rule 6 of 03 §2 — see `erasure.ts` for what erasure means per table).
@@ -21,13 +26,18 @@
  *                                 never "wear it anyway".
  */
 
-import { timingSafeEqual } from 'node:crypto';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ForbiddenError, TokenError, bearerFrom, requireScope, statusFor, type Principal } from '@cloudsforge/auth';
 import type { Lifecycle } from '@cloudsforge/lifecycle';
 import { Metrics, newRequestId, type Logger } from '@cloudsforge/telemetry';
 import type { JobQueue } from '@cloudsforge/jobs';
-import { signEvent, withInbox, type Db } from './outbox.ts';
+import {
+  LEGACY_SIGNATURE_HEADER,
+  SIGNATURE_HEADER,
+  verifyInbound,
+  withInbox,
+  type Db,
+} from './outbox.ts';
 import type { GameData } from './content/gamedata.ts';
 import type { EntitlementReader } from './billingclient.ts';
 import { NotFoundError, ValidationError, findSave, getSave, startGame } from './savegame.ts';
@@ -65,7 +75,12 @@ export interface ServerDeps {
   readonly data: GameData;
   readonly billing: EntitlementReader;
   readonly queue: Pick<JobQueue, 'enqueue'>;
-  readonly eventSigningSecret: string;
+  /**
+   * Every key an inbound delivery may have been signed with, newest first — `OUTBOX_ACCEPT_SECRETS`,
+   * defaulting to `[OUTBOX_SIGNING_SECRET]`. A LIST rather than a value because the estate's outbox
+   * key is one secret shared by 24 services and swapping it partitions delivery; see `verifyInbound`.
+   */
+  readonly eventAcceptSecrets: readonly string[];
   readonly beforeScrape?: () => Promise<void>;
 }
 
@@ -84,6 +99,12 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
       labels: ['reason'],
     })
     .register({
+      name: 'emberkin_events_accepted_total',
+      help: 'Inbound events whose signature verified, by scheme. `legacy` reaching zero is what says billing has migrated and the legacy arm may be deleted.',
+      kind: 'counter',
+      labels: ['scheme'],
+    })
+    .register({
       name: 'emberkin_cosmetic_refusals_total',
       help: 'Attempts to equip a cosmetic the account does not own. Non-zero means a client believes it may.',
       kind: 'counter',
@@ -99,7 +120,6 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_BODY_BYTES = 256 * 1024;
-const SIGNATURE_HEADER = 'x-cloudsforge-signature';
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const SEED_RE = /^\d{1,20}$/;
 
@@ -266,14 +286,24 @@ function buildRoutes(): Route[] {
 
     define('POST', '/v1/events', async (ctx, deps) => {
       const raw = await readRaw(ctx.req);
-      const presented = headerOf(ctx.req, SIGNATURE_HEADER);
-      if (!presented || !verifySignature(raw, deps.eventSigningSecret, presented)) {
+      // Verified over the RAW BYTES, before `JSON.parse` — parsing first would let an
+      // unauthenticated caller reach the parser. Two header names because this service's two
+      // producers are on two schemes: identity signs the contract's `cf-signature`, billing still
+      // sends the legacy `x-cloudsforge-signature`. `verifyInbound` carries the whole argument.
+      const scheme = verifyInbound(raw.toString('utf8'), deps.eventAcceptSecrets, {
+        contract: headerOf(ctx.req, SIGNATURE_HEADER) ?? '',
+        legacy: headerOf(ctx.req, LEGACY_SIGNATURE_HEADER) ?? '',
+      });
+      if (scheme === null) {
         deps.metrics.increment('emberkin_events_rejected_total', { reason: 'bad_signature' });
         ctx.log.warn('an inbound event failed its signature check');
         // NOT 401. This is not a bearer-token surface, and a 401 invites the caller to go and find
         // a token — there isn't one to find. The MAC is the credential.
         return errorReply(403, 'bad_signature', 'the event signature did not verify', ctx.requestId);
       }
+      // Reported so the legacy arm is deleted on evidence rather than on a belief: when this stops
+      // reading `legacy`, `micro-billing`'s relay has moved and the arm can go.
+      deps.metrics.increment('emberkin_events_accepted_total', { scheme });
 
       let envelope: Record<string, unknown>;
       try {
@@ -569,13 +599,6 @@ function serializeSave(save: import('./savegame.ts').SaveState): Record<string, 
     equippedCosmetics: save.equippedCosmetics,
     saveVersion: save.saveVersion,
   };
-}
-
-function verifySignature(body: Buffer, secret: string, presented: string): boolean {
-  const expected = Buffer.from(signEvent(body.toString('utf8'), secret));
-  const actual = Buffer.from(presented);
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
 }
 
 async function readRaw(req: IncomingMessage): Promise<Buffer> {
