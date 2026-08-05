@@ -219,6 +219,65 @@ export const MIGRATIONS: readonly Migration[] = [
       create index if not exists reward_grants_season_idx on reward_grants (season_id, granted_at desc);
     `,
   },
+  {
+    version: 8,
+    name: 'erasure',
+    up: `
+      -- ══════════════════════════════════════════════════════════════════════════════════════════
+      -- **RIGHT TO ERASURE, AND THE ONE ROW THAT SURVIVES IT.**
+      --
+      -- Rule 6 of docs/ecosystem/03 §2: a service storing a \`user_id\` subscribes to
+      -- \`identity.user.deleted\` and erases. \`saves\` (and \`battles\` by cascade) and
+      -- \`player_achievements\` are simply deleted — see the table in src/erasure.ts. A
+      -- \`reward_grants\` row is NOT: it is the local record of a ledger posting that moved real
+      -- money, and \`seasons.rewards_granted_shards\` is the sum it must continue to reconcile
+      -- against. So the row is kept and its \`user_id\` is overwritten with a RANDOM uuid.
+      --
+      -- A random uuid in a \`uuid not null\` column is indistinguishable from a real account, which
+      -- is what these three objects fix:
+      --
+      --   \`user_erased_at\`  — non-null marks the row anonymised. Distinguishable, queryable,
+      --                       auditable: "how many grants belong to nobody" is now a query.
+      --   the CHECK        — an erased row's \`idempotency_key\` must carry the erased form.
+      --                       The key WAS \`emberkin:reward:<season>:<user>:<reason>\`, i.e. the
+      --                       user id in plain text (src/ledgerclient.ts:144), so anonymising the
+      --                       column alone would have left the id sitting in the row beside it.
+      --   the trigger      — erasure is ONE-WAY. An anonymised row can never be re-attributed to
+      --                       a person, by this service or by anything holding a psql prompt.
+      -- ══════════════════════════════════════════════════════════════════════════════════════════
+      alter table reward_grants add column if not exists user_erased_at timestamptz;
+
+      create index if not exists reward_grants_erased_idx
+        on reward_grants (user_erased_at)
+        where user_erased_at is not null;
+
+      alter table reward_grants drop constraint if exists reward_grants_erased_key_form;
+      alter table reward_grants add constraint reward_grants_erased_key_form check (
+        user_erased_at is null
+        or idempotency_key ~ '^emberkin:reward:erased:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      );
+
+      create or replace function reward_grants_erasure_is_one_way() returns trigger
+      language plpgsql as $$
+      begin
+        if old.user_erased_at is not null then
+          if new.user_id is distinct from old.user_id then
+            raise exception 'reward_grants: an erased grant cannot be re-attributed to a person (grant %)', old.id;
+          end if;
+          if new.user_erased_at is null then
+            raise exception 'reward_grants: an erasure cannot be undone (grant %)', old.id;
+          end if;
+        end if;
+        return new;
+      end;
+      $$;
+
+      drop trigger if exists reward_grants_one_way_erasure on reward_grants;
+      create trigger reward_grants_one_way_erasure
+        before update on reward_grants
+        for each row execute function reward_grants_erasure_is_one_way();
+    `,
+  },
 ];
 
 /** The version this build requires. `index.ts` asserts it at boot and refuses to serve below it. */

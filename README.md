@@ -97,11 +97,28 @@ schema version and refuses to serve below it. Copy `.env.example` to `.env` for 
 ## HTTP surface
 
 - `GET /livez` · `GET /readyz` · `GET /metrics`
-- `POST /v1/events` — signed inbound webhook (season-pass grant → leased reward job)
+- `POST /v1/events` — signed inbound webhook. Two topics: `billing.entitlement.granted`
+  (season-pass grant → leased reward job) and `identity.user.deleted` (erasure — see below). Any
+  other topic is 202'd and ignored; a bad signature is **403**, checked before the body is parsed.
 - `POST /v1/saves` — start a game (idempotent per account) · `GET /v1/saves/me`
 - `POST /v1/saves/me/battles` — resolve a battle server-side; idempotent on `Idempotency-Key`
 - `PUT /v1/saves/me/cosmetics` — equip a cosmetic, gated by a billing entitlement, never a stat
 - `GET /v1/saves/me/achievements` · `GET /v1/content/dex`
+
+## Right to erasure
+
+Rule 6 of `docs/ecosystem/03` §2: a service storing a `user_id` subscribes to
+`identity.user.deleted`. On that event the save is deleted (battles follow by foreign-key cascade),
+achievements are deleted, and queued jobs and emitted outbox rows naming the user go with them.
+
+**One row survives, anonymised: `reward_grants`.** It is the local record of a ledger posting that
+moved real money, and `seasons.rewards_granted_shards` is the total it has to keep reconciling
+against — deleting it would leave the season reporting spend with nothing to account for. Its
+`user_id` becomes a random uuid, its `idempotency_key` is overwritten (the derived key embedded the
+raw uuid in plain text) and `user_erased_at` marks it, with a database trigger making the erasure
+one-way: an anonymised grant can never be re-attributed to a person. The per-table reasoning and
+the lawful basis for each decision are in the header of `src/erasure.ts`, in the code, so they
+cannot drift from the behaviour.
 
 ---
 

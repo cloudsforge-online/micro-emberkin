@@ -174,7 +174,9 @@ test('server: the webhook rejects a bad signature and dedupes a valid one', { sk
   const { body, signature } = await signedEvent(SECRET, envelope);
 
   const bad = await fetch(`${base}/v1/events`, { method: 'POST', headers: { 'x-cloudsforge-signature': 'sha256=deadbeef', 'content-type': 'application/json' }, body });
-  assert.equal(bad.status, 401);
+  // 403, not 401: the MAC is the credential on this surface, and a 401 would invite the caller to
+  // go and find a token that does not exist. See the comment at the check in server.ts.
+  assert.equal(bad.status, 403);
 
   const good = await fetch(`${base}/v1/events`, { method: 'POST', headers: { 'x-cloudsforge-signature': signature, 'content-type': 'application/json' }, body });
   assert.equal(good.status, 202);

@@ -11,6 +11,10 @@
  * `withInbox` and enqueues a leased reward job — it never posts to the ledger inline, so a ledger
  * outage cannot make the producer's relay redeliver.
  *
+ * It serves TWO topics on that one route, `SUBSCRIBED_TOPICS`: `billing.entitlement.granted` and
+ * `identity.user.deleted` (rule 6 of 03 §2 — see `erasure.ts` for what erasure means per table).
+ * Anything else is 202'd and ignored, because a 4xx makes the producer's relay retry for ever.
+ *
  * The fail-open / fail-closed split on cosmetics:
  *   `GET /v1/saves/me`            fails OPEN — it runs on every app load and reads only our own data.
  *   `PUT /v1/saves/me/cosmetics`  fails CLOSED with a 503 on a billing outage — "ask again later",
@@ -27,6 +31,7 @@ import { signEvent, withInbox, type Db } from './outbox.ts';
 import type { GameData } from './content/gamedata.ts';
 import type { EntitlementReader } from './billingclient.ts';
 import { NotFoundError, ValidationError, findSave, getSave, startGame } from './savegame.ts';
+import { eraseUser } from './erasure.ts';
 import { resolveBattle } from './battles.ts';
 import { CosmeticNotOwnedError, equipCosmetic } from './cosmetics.ts';
 import { withOutbox } from './outbox.ts';
@@ -42,6 +47,13 @@ export const WRITE_SCOPE = 'emberkin:write';
 /** Billing SKUs whose grant pays a season welcome reward. */
 const SEASON_PASS_SKUS = new Set(['emberkin_season_pass', 'season_pass']);
 const GRANTED_TOPIC = 'billing.entitlement.granted';
+/** Rule 6 of docs/ecosystem/03 §2 — a service storing a `user_id` subscribes to this. See erasure.ts. */
+const DELETED_TOPIC = 'identity.user.deleted';
+/**
+ * The topics this service acts on. Anything else is ACKNOWLEDGED and ignored — never 4xx'd, because
+ * a 4xx makes the producer's relay retry the same event for ever.
+ */
+const SUBSCRIBED_TOPICS: ReadonlySet<string> = new Set([GRANTED_TOPIC, DELETED_TOPIC]);
 
 export interface ServerDeps {
   readonly lifecycle: Lifecycle;
@@ -258,7 +270,9 @@ function buildRoutes(): Route[] {
       if (!presented || !verifySignature(raw, deps.eventSigningSecret, presented)) {
         deps.metrics.increment('emberkin_events_rejected_total', { reason: 'bad_signature' });
         ctx.log.warn('an inbound event failed its signature check');
-        return errorReply(401, 'bad_signature', 'the event signature did not verify', ctx.requestId);
+        // NOT 401. This is not a bearer-token surface, and a 401 invites the caller to go and find
+        // a token — there isn't one to find. The MAC is the credential.
+        return errorReply(403, 'bad_signature', 'the event signature did not verify', ctx.requestId);
       }
 
       let envelope: Record<string, unknown>;
@@ -279,7 +293,7 @@ function buildRoutes(): Route[] {
         deps.metrics.increment('emberkin_events_rejected_total', { reason: 'malformed' });
         throw new BadRequestError('an event envelope must carry a uuid id');
       }
-      if (topic !== GRANTED_TOPIC) {
+      if (!SUBSCRIBED_TOPICS.has(topic)) {
         deps.metrics.increment('emberkin_events_rejected_total', { reason: 'not_subscribed' });
         return { status: 202, body: { status: 'ignored', topic } };
       }
@@ -288,13 +302,39 @@ function buildRoutes(): Route[] {
         typeof envelope['payload'] === 'object' && envelope['payload'] !== null
           ? (envelope['payload'] as Record<string, unknown>)
           : {};
-      const sku = typeof payload['sku'] === 'string' ? payload['sku'] : '';
-      const subject = typeof payload['subject'] === 'string' ? payload['subject'] : '';
-      const entitlementId = typeof payload['entitlementId'] === 'string' ? payload['entitlementId'] : eventId;
-      const userId = subject.startsWith('user:') ? subject.slice('user:'.length) : '';
 
       const done = deps.lifecycle.track();
       try {
+        if (topic === DELETED_TOPIC) {
+          // A BARE uuid, taken as it stands: every `user_id` column in this schema is a uuid, so
+          // there is no `user:` prefix to strip here. That conversion belongs to billing's
+          // `subject` below and the two must not be confused — stripping a prefix that is not there
+          // would erase nobody and answer 202.
+          const erasedUserId = typeof payload['userId'] === 'string' ? payload['userId'] : '';
+          if (!UUID.test(erasedUserId)) {
+            deps.metrics.increment('emberkin_events_rejected_total', { reason: 'malformed' });
+            // 400 rather than a quiet 202: a deletion we cannot perform must not be acknowledged as
+            // performed. That silence is the defect this handler exists to fix.
+            throw new BadRequestError('identity.user.deleted requires a uuid userId');
+          }
+          const erasure = await withInbox(deps.sql, topic, eventId, (tx) => eraseUser(tx, erasedUserId));
+          if (erasure.status === 'duplicate') return { status: 202, body: { status: 'duplicate' } };
+          if (erasure.value.battlesNotCascaded > 0) {
+            ctx.log.error('battles did not cascade from saves — the foreign key has changed', {
+              eventId,
+              battles: erasure.value.battlesNotCascaded,
+            });
+          }
+          // Counts, never the id: it is the thing we were just asked to forget.
+          ctx.log.info('erased a user on identity.user.deleted', { eventId, ...erasure.value });
+          return { status: 202, body: { status: 'accepted', erased: true } };
+        }
+
+        const sku = typeof payload['sku'] === 'string' ? payload['sku'] : '';
+        const subject = typeof payload['subject'] === 'string' ? payload['subject'] : '';
+        const entitlementId = typeof payload['entitlementId'] === 'string' ? payload['entitlementId'] : eventId;
+        const userId = subject.startsWith('user:') ? subject.slice('user:'.length) : '';
+
         // Deduped on the source event id. A failed handler leaves no inbox row, so a redelivery is
         // reprocessed rather than swallowed.
         const outcome = await withInbox(deps.sql, topic, eventId, async () => {
