@@ -147,9 +147,32 @@ jobs:
           echo 'ok: no balance column'
 
       - name: The inbound event webhook still verifies a signature
+        # This used to grep src/server.ts for 'timingSafeEqual', and that proxy went stale the
+        # moment the signature scheme moved to @cloudsforge/contracts-events: the timing-safe
+        # comparison now lives in the contract's verifyDelivery, which is exactly where it should
+        # live and precisely what the old grep read as "the check is gone". A guard that fails on
+        # the correct fix teaches people to delete the guard, so it now asserts the PROPERTY —
+        # the route verifies before it parses, and refuses — rather than one file's spelling.
         run: |
-          grep -q 'timingSafeEqual' src/server.ts \
+          grep -q 'verifyInbound(' src/server.ts \
             || { echo '::error::the event signature check is gone; POST /v1/events is a reward-anyone endpoint'; exit 1; }
+          # Verified over the RAW BYTES, before JSON.parse: parsing first hands the parser to an
+          # unauthenticated caller. The verify call must come before the first parse in the file.
+          verify_at=$(grep -n 'verifyInbound(' src/server.ts | head -1 | cut -d: -f1)
+          parse_at=$(grep -n 'JSON.parse(raw' src/server.ts | head -1 | cut -d: -f1)
+          if [ -z "$parse_at" ] || [ "$verify_at" -ge "$parse_at" ]; then
+            echo '::error::the signature is no longer checked BEFORE the body is parsed'
+            exit 1
+          fi
+          # And a failed check still refuses. 403, not 401: the MAC is the credential.
+          grep -q "403, 'bad_signature'" src/server.ts \
+            || { echo '::error::a bad event signature no longer answers 403'; exit 1; }
+          # The scheme itself is the contract's, imported rather than copied. A local sha256=<hmac>
+          # in the signing path is the drift that made every delivery to this service 403 for the
+          # whole of its life; the one permitted mention is the documented legacy inbound arm.
+          grep -q "from '@cloudsforge/contracts-events'" src/outbox.ts \
+            || { echo '::error::the event signing scheme is no longer the contract'"'"'s; it has drifted again'; exit 1; }
+          echo 'ok: inbound events are verified against the contract scheme before parsing'
 
       - name: A battle submission still requires an idempotency key
         run: |
