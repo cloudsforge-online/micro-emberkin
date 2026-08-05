@@ -52,6 +52,15 @@ jobs:
       # NO GUARD WAS WEAKENED TO MAKE THIS PASS. CI does not need a WEAK secret, it needs A secret:
       # nothing in the smoke test verifies a signature or authenticates to anything, so both values
       # are generated per run by service-ci.yml and thrown away.
+      #
+      # `@token` NEEDS micro-org's service-ci.yml AT OR AFTER 15a32a3. If this job fails with
+      # `EMBERKIN_SERVICE_TOKEN is not a minted service token`, the literal `@token` reached the
+      # container unsubstituted, which means the called workflow predates that commit.
+      #
+      # AND RE-RUNNING WILL NOT FIX IT, which cost a red run to learn and is worth writing down: a
+      # reusable workflow is resolved when the RUN IS CREATED, and `gh run rerun` replays that same
+      # resolved version rather than re-reading `@main`. Only a new run — a fresh push — picks up a
+      # change to the called workflow.
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4001
