@@ -1,7 +1,7 @@
 // The postings a reward is made of. No database and no ledger: these are pure functions, and the
 // thing worth pinning is the ACCOUNT KEY and its TYPE, because the ledger keys an account on
 // (subject, asset_code, purpose) and refuses an entry whose stated type disagrees with the row
-// that already exists (ledger/src/accounts.ts:125, AccountConflictError).
+// that already exists (ledger/src/accounts.ts, AccountConflictError).
 //
 // That refusal is not per-entry. It is every entry, from whichever service posted second, for as
 // long as the disagreement stands — and it is invisible to every suite in the estate because each

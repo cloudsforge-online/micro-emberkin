@@ -16,8 +16,8 @@
  *
  * It is now written from the SERVER: the routes below are `worlds/src/server.ts`'s real routes and
  * nothing else, its real gates (`worlds:title`, not `worlds:write`), its real UUID path check
- * (`itemIdOf`, `:968-972`), its real define-before-unlock rule (`rewards.ts:216`) and its real
- * 201/200 split (`:790`). Anything else 404s, exactly as worlds does. The bodies are parsed with
+ * (`itemIdOf`), its real define-before-unlock rule (`rewards.ts`) and its real
+ * 201/200 split. Anything else 404s, exactly as worlds does. The bodies are parsed with
  * `@cloudsforge/contracts-worlds`' parsers — the same functions the real server would use — so a
  * client that renames a field cannot satisfy this fake either.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -110,7 +110,7 @@ export async function fakeWorlds(options: FakeWorldsOptions | string = {}): Prom
         }
       });
     };
-    /** worlds/src/server.ts:776-778 — authenticate, then `requireScope(principal, TITLE_SCOPE)`. */
+    /** worlds/src/server.ts — authenticate, then `requireScope(principal, TITLE_SCOPE)`. */
     const authorised = (): boolean => {
       if (req.headers.authorization !== `Bearer ${token}`) {
         reply(401, { error: { code: 'unauthenticated', message: 'token required' } });
@@ -132,15 +132,15 @@ export async function fakeWorlds(options: FakeWorldsOptions | string = {}): Prom
       return reply(503, { error: { code: 'unavailable', message: 'restarting' } });
     }
 
-    // worlds/src/server.ts:507 — the registry, public and unauthenticated.
+    // worlds/src/server.ts — the registry, public and unauthenticated.
     if (url.pathname === '/v1/titles' && req.method === 'GET') {
       return reply(200, {
         titles: [{ id: EMBERKIN_TITLE_ID, slug, name: 'Emberkin', status: 'live', capabilities: [], assetScopes: [] }],
       });
     }
 
-    // worlds/src/server.ts:754 and :775 — the only two achievement writes that exist, both under a
-    // UUID path. `itemIdOf` (:968-972) answers 404 to a path parameter that is not a UUID, which is
+    // worlds/src/server.ts and :775 — the only two achievement writes that exist, both under a
+    // UUID path. `itemIdOf` answers 404 to a path parameter that is not a UUID, which is
     // exactly what a client sending a slug used to get.
     const define = /^\/v1\/titles\/([^/]+)\/achievements$/.exec(url.pathname);
     const unlock = /^\/v1\/titles\/([^/]+)\/achievements\/unlock$/.exec(url.pathname);
@@ -167,7 +167,7 @@ export async function fakeWorlds(options: FakeWorldsOptions | string = {}): Prom
       return readBody((body) => {
         const parsed = parseAchievementUnlock(body);
         if (!parsed.ok) return reply(400, { error: { code: 'bad_request', message: parsed.errors.join('; ') } });
-        // worlds/src/rewards.ts:215-216 — an unlock of an achievement worlds was never told about
+        // worlds/src/rewards.ts — an unlock of an achievement worlds was never told about
         // is refused, and the server maps that to 400.
         if (!defined.has(parsed.value.key)) {
           return reply(400, { error: { code: 'bad_request', message: `no achievement ${parsed.value.key} for this title` } });

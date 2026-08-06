@@ -98,7 +98,7 @@ const JWT_SHAPE = /^ey[A-Za-z0-9_-]*\./;
  *
  * ── WHY THIS SLOT IS NOT `assertServiceCredential`, WHICH IS THE OBVIOUS ANSWER ────────────────
  *
- * Because `index.ts:60` is `const token = (): string => env.serviceToken` — the value is PRESENTED
+ * Because `index.ts` is `const token = (): string => env.serviceToken` — the value is PRESENTED
  * as a bearer, verbatim, with no exchange. So it must be a ten-minute JWT from
  * `POST /service-tokens`, and `estate-bootstrap.sh` mints it into the CREDENTIALS list for exactly
  * that reason. `EMBERKIN_IDENTITY_CREDENTIAL` is also minted, by §5b, and sits in `tokens.env`
@@ -160,7 +160,7 @@ function optional(source: Source, name: string, fallback: string): string {
  * and "just for the drain" is exactly how a placeholder survives a rotation meant to remove it.
  *
  * THE BODY OF THIS FUNCTION IS GONE, not reimplemented. It was the eleventh copy of the same
- * parser in the estate — `trade/src/env.ts:112` and `settlement/src/env.ts:433` carried the others
+ * parser in the estate — `trade/src/env.ts` and `settlement/src/env.ts` carried the others
  * — and eleven copies of a check are eleven chances for one of them to drift. `parseSecretList` in
  * `@cloudsforge/secrets` is the one copy, and it keeps the duplicate check this copy had.
  *
@@ -226,7 +226,7 @@ export interface Env {
   readonly worldsUrl: string;
   /**
    * The scoped service TOKEN — a ten-minute JWT, not a credential, and the distinction is the whole
-   * of micro-org #197/#222. `index.ts:60` presents it verbatim as a Bearer with no exchange, so it
+   * of micro-org #197/#222. `index.ts` presents it verbatim as a Bearer with no exchange, so it
    * must be what `POST /service-tokens` mints. Not shared: SD-05. Carries billing:read,
    * ledger:post, worlds:write. See `requiredMintedToken` for the guard and for why this slot is
    * being retired rather than made stricter.

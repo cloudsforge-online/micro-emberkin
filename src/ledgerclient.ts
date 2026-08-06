@@ -88,10 +88,10 @@ export interface LedgerClient {
  *
  * This function used to debit `(platform, SHARD, fees)` as type `expense`. `micro-billing`,
  * `micro-market`, `micro-mint`, `micro-trade` and `micro-wallet` all name that SAME account key as
- * type `revenue` (market/src/ledgerclient.ts:123, wallet/src/money.ts:145). The ledger's account
+ * type `revenue` (market/src/ledgerclient.ts, wallet/src/money.ts). The ledger's account
  * key is `(subject, asset_code, purpose)` — nothing else — and `ensureAccount` THROWS
  * `AccountConflictError` when a caller's stated type disagrees with the row that already exists
- * (ledger/src/accounts.ts:125). So whichever of us posted second would have had EVERY entry
+ * (ledger/src/accounts.ts). So whichever of us posted second would have had EVERY entry
  * refused, for as long as the disagreement stood. No suite caught it because each service tests
  * against its own fake ledger, so nothing in CI ever puts two real services against one real
  * ledger. `micro-worlds` carried the identical defect in the identical function and was moved off
@@ -99,7 +99,7 @@ export interface LedgerClient {
  *
  * `revenue` was the correct reading and `expense` was ours to give up: a platform fee line is
  * income, and `micro-ledger` says so in its own chart — "`platform` is revenue under `fees`,
- * equity under `treasury` and expense under `payout_due`" (ledger/src/accounts.ts:16-17). But a
+ * equity under `treasury` and expense under `payout_due`" (ledger/src/accounts.ts). But a
  * reward is not a fee at all, in either direction, so retyping to `revenue` would only have
  * swapped a collision for a lie. docs/ecosystem/21 §4 already names the right account: "every
  * grant a service pays out references its engagement account as the debit side", so an auditor

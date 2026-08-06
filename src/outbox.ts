@@ -176,9 +176,9 @@ export type InboundScheme = 'contract' | 'legacy'
  * rather than a preference. This service subscribes to two topics and they are not on the same
  * scheme:
  *
- *   - `identity.user.deleted` — `identity/src/outbox.ts:48,325` imports `signDelivery` and sends
+ *   - `identity.user.deleted` — `identity/src/outbox.ts,325` imports `signDelivery` and sends
  *     `cf-signature`. The CONTRACT arm is what this one needs, and nothing else will do.
- *   - `billing.entitlement.granted` — `billing/src/outbox.ts:109,308` still sends a local
+ *   - `billing.entitlement.granted` — `billing/src/outbox.ts,308` still sends a local
  *     `x-cloudsforge-signature: sha256=<hmac over body>`, and says so on purpose: "moving the
  *     producer half is a coordinated change across those consumers".
  *

@@ -89,7 +89,7 @@ service emitted was refused by its consumers for the mirror-image reason. Both d
 
 Inbound verification has a **second, legacy arm**, and it is deliberate: this service's two
 producers are on two schemes. `identity` sends the contract's signature; `billing` still sends the
-legacy one (`billing/src/outbox.ts:308`, on purpose — "moving the producer half is a coordinated
+legacy one (`billing/src/outbox.ts`, on purpose — "moving the producer half is a coordinated
 change across those consumers"). Verifying only the contract's way would fix erasure and break the
 season pass in the same commit. `emberkin_events_accepted_total{scheme="legacy"}` reaching zero is
 what says billing has migrated and the arm can be deleted; `outbox.test.ts` pins it until then.

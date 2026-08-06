@@ -19,7 +19,7 @@
  * |                       |                       | else has a right to it, and no obligation      |
  * |                       |                       | requires it. Art. 17(1)(a).                   |
  * | `battles`             | DELETE (by cascade)   | `user_id` references `saves` `on delete        |
- * |                       |                       | cascade` (migrations.ts:124), so the campaign |
+ * |                       |                       | cascade` (migrations.ts), so the campaign |
  * |                       |                       | history goes with the save. VERIFIED, not     |
  * |                       |                       | assumed: the delete below re-runs against     |
  * |                       |                       | `battles` afterwards and reports what it      |
@@ -57,21 +57,21 @@
  * |                       |                       | are kept rather than deleted:                 |
  * |                       |                       | `rewards_granted_shards` is a running total   |
  * |                       |                       | fenced by `seasons_within_budget`             |
- * |                       |                       | (migrations.ts:198), and deleting a grant     |
+ * |                       |                       | (migrations.ts), and deleting a grant     |
  * |                       |                       | would NOT decrement it. The total would then  |
  * |                       |                       | stand against no rows, the budget would still |
  * |                       |                       | be spent, and the discrepancy would look      |
  * |                       |                       | exactly like the reward exploit the cap       |
  * |                       |                       | exists to catch.                              |
  * | `jobs`                | DELETE (this user's)  | A queued `season.reward` job carries          |
- * |                       |                       | `payload.userId` (jobs.ts:90-103), so the     |
+ * |                       |                       | `payload.userId` (jobs.ts), so the     |
  * |                       |                       | queue is a fourth place this service stores a |
  * |                       |                       | user id. Erasing everything else and leaving  |
  * |                       |                       | the queue holding the id — and, worse, about  |
  * |                       |                       | to pay a reward to it — is not erasure.       |
  * | `outbox`              | DELETE (this user's)  | Emitted events carry `payload.userId` and     |
- * |                       |                       | `actor = 'user:<id>'` (battles.ts:202-218,    |
- * |                       |                       | seasons.ts:136-142) and are never pruned, so  |
+ * |                       |                       | `actor = 'user:<id>'` (battles.ts,    |
+ * |                       |                       | seasons.ts) and are never pruned, so  |
  * |                       |                       | they are a durable copy of the id. Undelivered|
  * |                       |                       | ones go too: an achievement announcement for  |
  * |                       |                       | an account that has just been erased must not |
@@ -85,7 +85,7 @@
  *
  * **`reward_grants.idempotency_key` CONTAINED THE USER ID IN PLAIN TEXT.** The schema comment calls
  * it "derived from (season, user, reason)", which undersells it: `rewardIdempotencyKey`
- * (ledgerclient.ts:144) returns `emberkin:reward:<seasonId>:<userId>:<reason>` — not a hash, the
+ * (ledgerclient.ts) returns `emberkin:reward:<seasonId>:<userId>:<reason>` — not a hash, the
  * uuid itself. Anonymising `user_id` and leaving that column would have moved the identifier one
  * column to the right and called it erasure. It is therefore overwritten with
  * `emberkin:reward:erased:<random uuid>`, a form the `reward_grants_erased_key_form` CHECK pins so
@@ -107,9 +107,9 @@
  * **`battles.spec` DOES NOT NAME THE OPPONENT, so no other user's row needs redacting.** Worth
  * checking, because the schema comment advertises async PvP and a spec that embedded an opponent's
  * id would mean surviving rows belonging to OTHER users still named the erased one. It does not:
- * the spec written at battles.ts:167 is `{ seed, enemy, script, maxTurns }`, where `enemy` is
+ * the spec written at battles.ts is `{ seed, enemy, script, maxTurns }`, where `enemy` is
  * `{ name, isWild, party: KinSpec[] }` and `KinSpec` is `{ species, level, resonance, temperament,
- * nickname }` (engine/replay.ts:14-20). No user id, no account reference, no warden name — the
+ * nickname }` (engine/replay.ts). No user id, no account reference, no warden name — the
  * player's own warden name comes from the save at resolve time and appears only in that row's own
  * `log`, which is deleted with it. Async PvP is, today, only the determinism that would make it
  * possible: the single battle route (`POST /v1/saves/me/battles`) takes the enemy from the request
@@ -121,8 +121,8 @@
  * it.
  *
  * **The achievement sweep tolerates the rows vanishing.** `ACH_SWEEP_KIND` selects ids
- * (achievements.ts:41-46) and enqueues one `achievement.deliver` per id; the delivery re-reads the
- * row and returns the terminal outcome `'gone'` when it has disappeared (achievements.ts:57), which
+ * (achievements.ts) and enqueues one `achievement.deliver` per id; the delivery re-reads the
+ * row and returns the terminal outcome `'gone'` when it has disappeared (achievements.ts), which
  * completes the job rather than throwing. So an erasure that lands between a sweep and its
  * deliveries drains quietly instead of spinning in a retry loop.
  *

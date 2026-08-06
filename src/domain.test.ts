@@ -260,7 +260,7 @@ test('achievement: delivery posts to worlds once and is idempotent; an outage re
       !worlds.requested.some((r) => r.includes('/internal/')),
       'the client is still calling a route worlds does not serve',
     );
-    // Worlds refuses an unlock for an achievement it was never told about (rewards.ts:216).
+    // Worlds refuses an unlock for an achievement it was never told about (rewards.ts).
     assert.ok(worlds.defined.has('resonance_perfect'), 'the badge was unlocked without being defined');
 
     // Re-running is a no-op ('already'), and worlds is not posted to again.
@@ -359,7 +359,7 @@ test('achievement: a route worlds does not serve keeps the badge, it does not di
 
 test('achievement: the scope worlds demands is the scope we present, and a wrong one is not terminal', { skip }, async () => {
   // Both title clients declared `worlds:write` for months. The unlock route demands `worlds:title`
-  // (worlds/src/server.ts:777) — a separate authority so a title's credential cannot edit a
+  // (worlds/src/server.ts) — a separate authority so a title's credential cannot edit a
   // player's profile. Fixing only the route would have turned a silent 404 into a silent 403.
   const db = asDb(sql);
   const underscoped = await fakeWorlds({ scopes: ['worlds:write'] });

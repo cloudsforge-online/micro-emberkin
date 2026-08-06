@@ -70,7 +70,7 @@ test('env: a CHANGE_ME placeholder secret is refused', () => {
 });
 
 test('env: the service token must be a MINTED token, not a typed string', () => {
-  // `index.ts:60` presents this value verbatim as a Bearer, so a non-JWT here 401s all three
+  // `index.ts` presents this value verbatim as a Bearer, so a non-JWT here 401s all three
   // upstreams with nothing in either log naming the cause. The old assertion was `'short'`, which a
   // 24-character floor caught by accident; the value that mattered is the compose DEFAULT, which is
   // 40 characters, was on no deny-list, and booted.

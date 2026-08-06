@@ -106,8 +106,8 @@ test('a stale delivery is refused, because the timestamp is INSIDE the signed me
 
 /**
  * The asymmetry is not a preference. This service's two producers are on two schemes today:
- * identity sends `cf-signature` (`identity/src/outbox.ts:325`), billing still sends
- * `x-cloudsforge-signature` (`billing/src/outbox.ts:308`, deliberately). Verifying only the
+ * identity sends `cf-signature` (`identity/src/outbox.ts`), billing still sends
+ * `x-cloudsforge-signature` (`billing/src/outbox.ts`, deliberately). Verifying only the
  * contract's way would fix erasure and break the season pass in the same commit.
  */
 test('verifyInbound accepts identity"s contract signature and says which scheme matched', () => {
