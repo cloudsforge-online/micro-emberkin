@@ -34,6 +34,28 @@ const generatedKey = (): string => randomBytes(48).toString('base64');
 const MINTED_TOKEN =
   'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlbWJlcmtpbiIsImV4cCI6MH0.c2lnbmF0dXJl';
 
+/**
+ * A LONG-LIVED SERVICE CREDENTIAL, AND THIS FIXTURE CONTAINS HYPHENS ON PURPOSE.
+ *
+ * A credential body is base64**url**, so `-` and `_` are in its alphabet. Measured on the running
+ * estates on 2026-08-07: the mainnet credential is alphanumeric and the testnet one CONTAINS A
+ * HYPHEN. An alphanumeric fixture therefore passes a guard that would refuse testnet at boot, which
+ * is why `env.ts` reaches for `assertServiceCredential` and never `assertGeneratedSecret` — the
+ * latter's base64 alphabet rejects the hyphen. Keeping the hyphens here means that mistake fails CI
+ * rather than one estate. `tessera`, `community` and `market` carry the same shaped fixture for the
+ * same reason.
+ */
+const CREDENTIAL = 'cfsc_TToR-eOeVTDnqhX1-nu6-u7DoCr4MCfa86g4g6kd404';
+
+/**
+ * THE CREDENTIAL, NOT THE TOKEN, IS WHAT A CORRECT DEPLOYMENT SETS — so it is what the base
+ * environment carries, and `EMBERKIN_SERVICE_TOKEN` is absent from it entirely.
+ *
+ * That absence is an assertion in itself. Every test in this file loads from `BASE`, and before
+ * micro-org #228 none of them could have: the token was REQUIRED, so a base environment without one
+ * threw at import. This file booting without it is the first proof that the ten-minute token is no
+ * longer how this service authenticates.
+ */
 const BASE: Record<string, string> = {
   EMBERKIN_DATABASE_URL: 'postgres://emberkin:emberkin@127.0.0.1:5432/emberkin',
   IDENTITY_JWKS_URL: 'http://id/.well-known/jwks.json',
@@ -42,7 +64,7 @@ const BASE: Record<string, string> = {
   LEDGER_URL: 'http://ledger',
   BILLING_URL: 'http://billing',
   WORLDS_URL: 'http://worlds',
-  EMBERKIN_SERVICE_TOKEN: MINTED_TOKEN,
+  EMBERKIN_IDENTITY_CREDENTIAL: CREDENTIAL,
 };
 for (const [key, value] of Object.entries(BASE)) process.env[key] = value;
 
@@ -69,11 +91,12 @@ test('env: a CHANGE_ME placeholder secret is refused', () => {
   );
 });
 
-test('env: the service token must be a MINTED token, not a typed string', () => {
-  // `index.ts` presents this value verbatim as a Bearer, so a non-JWT here 401s all three
-  // upstreams with nothing in either log naming the cause. The old assertion was `'short'`, which a
-  // 24-character floor caught by accident; the value that mattered is the compose DEFAULT, which is
-  // 40 characters, was on no deny-list, and booted.
+test('env: the service token, WHEN PRESENT, must still be a MINTED token, not a typed string', () => {
+  // In `static` mode this value is still presented verbatim as a Bearer, so a non-JWT here 401s all
+  // three upstreams with nothing in either log naming the cause. Making the slot OPTIONAL for
+  // micro-org #228 must not weaken the shape check on a value that IS set — absence is a mode and
+  // rubbish is not. The old assertion was `'short'`, which a 24-character floor caught by accident;
+  // the value that mattered is the compose DEFAULT, 40 characters, on no deny-list, and it booted.
   assert.throws(() => loadEnv({ ...BASE, EMBERKIN_SERVICE_TOKEN: 'short' }), EnvError);
   assert.throws(
     () => loadEnv({ ...BASE, EMBERKIN_SERVICE_TOKEN: 'estate-placeholder-token-0000000000000000' }),
@@ -82,10 +105,94 @@ test('env: the service token must be a MINTED token, not a typed string', () => 
   // A `cfsc_` credential is the OTHER wrong answer, and the tempting one: the estate mints
   // `EMBERKIN_IDENTITY_CREDENTIAL` and it sits in tokens.env looking like it belongs here.
   assert.throws(
-    () => loadEnv({ ...BASE, EMBERKIN_SERVICE_TOKEN: 'cfsc_vFpu5q-4UwZTvGSezkD9nTOy8r6lxWbhIBm8eaJoXiE' }),
+    () => loadEnv({ ...BASE, EMBERKIN_SERVICE_TOKEN: CREDENTIAL }),
     (err: unknown) => err instanceof EnvError && /not a minted service token/.test(err.message),
   );
-  assert.equal(loadEnv(BASE).serviceToken, MINTED_TOKEN);
+  assert.equal(loadEnv({ ...BASE, EMBERKIN_SERVICE_TOKEN: MINTED_TOKEN }).serviceToken, MINTED_TOKEN);
+});
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * micro-org #228 — the credential this service exchanges, and the token it used to hold forever.
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+test('#228: the base environment carries a CREDENTIAL and no token, and it boots', () => {
+  // The shape of the fix, stated as configuration. Before this change `EMBERKIN_SERVICE_TOKEN` was
+  // required, so this exact environment refused to start; now it is the RECOMMENDED one and the
+  // token is what is absent. `upstreams.ts` reads these two fields to pick its mode.
+  const env = loadEnv(BASE);
+  assert.equal(env.identityCredential, CREDENTIAL);
+  assert.equal(env.serviceToken, null);
+  // The fixture must keep its hyphens, or it stops exercising the base64url alphabet at all.
+  assert.ok(CREDENTIAL.slice('cfsc_'.length).includes('-'), 'the credential fixture lost its hyphens');
+});
+
+test('#228: a TOKEN in the credential slot is refused, by name, at the door', () => {
+  // The mirror image of the test above it, and the whole defect read backwards. A container handed
+  // a ten-minute JWT here would exchange nothing, work for ten minutes and fail exactly as before —
+  // so the two slots refuse each other's value rather than quietly accepting it. The refusal must
+  // not quote the value: a boot log is shipped to a collector.
+  assert.throws(
+    () => loadEnv({ ...BASE, EMBERKIN_IDENTITY_CREDENTIAL: MINTED_TOKEN }),
+    (err: unknown) =>
+      err instanceof Error &&
+      /EMBERKIN_IDENTITY_CREDENTIAL/.test(err.message) &&
+      /TOKEN, not a credential/.test(err.message) &&
+      !err.message.includes(MINTED_TOKEN),
+  );
+});
+
+test('#228: the credential faces the shape rules, and BYTES is the unit', () => {
+  assert.throws(() => loadEnv({ ...BASE, EMBERKIN_IDENTITY_CREDENTIAL: 'changeme' }), Error);
+  // The prefix alone is not a credential. Markers are checked on the BODY, after `cfsc_` is
+  // stripped, or `cfsc_` would launder every placeholder somebody prefixes with it.
+  assert.throws(() => loadEnv({ ...BASE, EMBERKIN_IDENTITY_CREDENTIAL: 'cfsc_ci-only-not-a-real-credential' }), Error);
+  // `cfsc_` plus 32 keystrokes is 24 bytes of base64url, under the floor. Keystrokes were never
+  // the unit — the same lesson micro-org #212 taught about the signing key.
+  assert.throws(
+    () => loadEnv({ ...BASE, EMBERKIN_IDENTITY_CREDENTIAL: `cfsc_${'a'.repeat(32)}` }),
+    (err: unknown) => err instanceof Error && !err.message.includes('a'.repeat(32)),
+  );
+});
+
+test('#228: an EMPTY credential is an ABSENT one, and the pair is what is required', () => {
+  // Compose interpolates `EMBERKIN_IDENTITY_CREDENTIAL: ${EMBERKIN_IDENTITY_CREDENTIAL:-}`, so an
+  // unset variable arrives as the EMPTY STRING rather than as absent. If empty read as present,
+  // `upstreams.ts` would pick `exchanged` and post an empty bearer to identity forever.
+  for (const blank of ['', '   ']) {
+    const source = { ...BASE, EMBERKIN_IDENTITY_CREDENTIAL: blank, EMBERKIN_SERVICE_TOKEN: MINTED_TOKEN };
+    assert.equal(loadEnv(source).identityCredential, null);
+    assert.equal(loadEnv(source).serviceToken, MINTED_TOKEN);
+  }
+  // NEITHER is the case that must not boot. Both slots are individually optional now, and without
+  // this check dropping the token to optional would have quietly turned "refuses to start" into
+  // "starts and answers 503 at every route that touches a peer". It also pins the deploy ORDERING:
+  // removing the token from the compose block before adding the credential fails here, in the boot
+  // log, naming both variables — not ten minutes later on a player's purchase.
+  const neither = { ...BASE, EMBERKIN_IDENTITY_CREDENTIAL: '' };
+  assert.throws(
+    () => loadEnv(neither),
+    (err: unknown) =>
+      err instanceof EnvError &&
+      /EMBERKIN_IDENTITY_CREDENTIAL/.test(err.message) &&
+      /EMBERKIN_SERVICE_TOKEN/.test(err.message),
+  );
+});
+
+test('#228: the exchange is dialled at IDENTITY_ISSUER unless IDENTITY_URL says otherwise', () => {
+  // Defaulting rather than adding a fourth required identity variable is what lets every existing
+  // deployment gain the exchange with no manifest change at all.
+  assert.equal(loadEnv(BASE).identityUrl, BASE.IDENTITY_ISSUER);
+  assert.equal(loadEnv({ ...BASE, IDENTITY_URL: 'http://identity:4000' }).identityUrl, 'http://identity:4000');
+  // A PATH is refused here rather than producing a `POST /v1//service-tokens/exchange` that 404s
+  // with nothing in the log naming the cause — the exact class of silent failure this issue is.
+  assert.throws(
+    () => loadEnv({ ...BASE, IDENTITY_URL: 'http://identity:4000/v1' }),
+    (err: unknown) => err instanceof EnvError && /must be an origin/.test(err.message),
+  );
+  assert.throws(
+    () => loadEnv({ ...BASE, IDENTITY_URL: 'ws://identity:4000' }),
+    (err: unknown) => err instanceof EnvError && /http or https/.test(err.message),
+  );
 });
 
 test('THE VALUE THAT SAT IN A PUBLIC REPOSITORY IS REFUSED — micro-org #142/#212', () => {

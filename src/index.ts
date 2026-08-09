@@ -18,9 +18,7 @@ import { SCHEMA_VERSION } from './migrations.ts';
 import { GameData } from './content/gamedata.ts';
 import { createServer, registerServiceMetrics } from './server.ts';
 import { onRunnerEvent, registerHandlers, seedRecurring } from './jobs.ts';
-import { httpBillingClient } from './billingclient.ts';
-import { httpLedgerClient } from './ledgerclient.ts';
-import { httpWorldsClient } from './worldsclient.ts';
+import { buildUpstreams } from './upstreams.ts';
 import type { Db } from './outbox.ts';
 
 // 1. Environment — validated on import of ./env.ts.
@@ -56,11 +54,53 @@ try {
   process.exit(1);
 }
 
-// 6. The upstreams. All take the same scoped service token — never a shared one (SD-05).
-const token = (): string => env.serviceToken;
-const ledger = httpLedgerClient({ baseUrl: env.ledgerUrl, token, deadlineMs: env.upstreamDeadlineMs, originatingService: SERVICE });
-const billing = httpBillingClient({ baseUrl: env.billingUrl, token, deadlineMs: env.upstreamDeadlineMs });
-const worlds = httpWorldsClient({ baseUrl: env.worldsUrl, token, deadlineMs: env.upstreamDeadlineMs });
+// 6. The upstreams. All three take the same scoped service token — never a shared one (SD-05).
+//
+// THE WIRING LIVES IN `./upstreams.ts` RATHER THAN HERE, and that is the substance of micro-org
+// #228 rather than tidiness. What stood here was `const token = () => env.serviceToken`: a
+// ten-minute JWT read once, at import, and handed to all three clients for the life of the process.
+// No test in this repository could see it, because importing this file opens a pool, asserts a
+// schema and calls `listen()` — so every test builds its own client, and a suite full of tests that
+// build their own clients cannot see a composition root that builds a different one.
+// `servicetoken.test.ts` goes through `buildUpstreams`, and reverting it turns that file red.
+const upstreams = buildUpstreams(env, {
+  // Never the token and never the credential: a mint carries a service name, an `expiresIn` and a
+  // refresh interval, and a failure carries a message. Both values are live credentials.
+  onEvent: (event) => {
+    if (event.kind === 'minted') {
+      logger.info('service token minted', {
+        peer: event.service,
+        expiresIn: event.expiresIn,
+        refreshInMs: event.refreshInMs,
+      });
+    } else if (event.kind === 'exchange_failed') {
+      // WARN while a usable token is still held, ERROR once there is not one. The distinction is
+      // the whole of "a failed refresh must not present as success": inside the 20% slack this is
+      // survivable and invisible to callers; outside it, every outbound call is now answering 503.
+      logger[event.hadUsableToken ? 'warn' : 'error']('service credential exchange failed', {
+        err: event.err,
+        hadUsableToken: event.hadUsableToken,
+      });
+    } else {
+      logger.warn('service token replay', { kind: event.kind, url: event.url });
+    }
+  },
+});
+const { billing, ledger, worlds } = upstreams;
+
+// THE MODE, SAID OUT LOUD AT BOOT. `static` is the defect still running: a deployment that has not
+// yet been given the credential the bootstrap already minted for it. It is `fatal` rather than
+// `warn` because the container will look perfectly healthy for ten minutes and then fail every
+// outbound call with nothing in any log naming the cause — which is exactly how this survived long
+// enough to become an issue. It does NOT exit: a rolling deploy has to be able to finish.
+if (upstreams.mode === 'static') {
+  logger.fatal('authenticating with a pre-minted service token, which expires ten minutes from now', {
+    remedy: 'pass EMBERKIN_IDENTITY_CREDENTIAL instead of EMBERKIN_SERVICE_TOKEN',
+    issue: 'micro-org#228',
+  });
+} else {
+  logger.info('exchanging a long-lived service credential for short-lived tokens', { identityUrl: env.identityUrl });
+}
 
 // 7. The Lifecycle and its probes.
 const lifecycle = new Lifecycle({
@@ -108,6 +148,20 @@ const server = createServer({
     const stats = await queue.stats();
     metrics.set('jobs_pending', stats.pending);
     metrics.set('jobs_overdue', stats.overdue);
+    // Read from what this process already holds; `snapshot()` dials nobody. A `static` deployment
+    // reports usable, because the token it was handed genuinely is a bearer it can present — for
+    // ten minutes. `emberkin_service_token_static` is the gauge that says it cannot be renewed.
+    metrics.set(
+      'emberkin_service_token_usable',
+      upstreams.mode === 'exchanged'
+        ? (upstreams.identityTokens?.snapshot().hasUsableToken ?? false)
+          ? 1
+          : 0
+        : upstreams.mode === 'static'
+          ? 1
+          : 0,
+    );
+    metrics.set('emberkin_service_token_static', upstreams.mode === 'static' ? 1 : 0);
   },
 });
 

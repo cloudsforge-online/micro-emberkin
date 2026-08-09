@@ -115,6 +115,29 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
       help: 'Achievements newly unlocked, bridged to the worlds shared profile.',
       kind: 'counter',
       labels: [],
+    })
+    .register({
+      // THE CHECK THAT DID NOT EXIST WHILE THE TOKEN WAS DEAD (micro-org #228). `/livez` makes no
+      // outbound call, so it answered 200 throughout — there was no signal anywhere that this
+      // container could no longer authenticate to billing, the ledger or worlds. Sampled on every
+      // scrape from the provider's own snapshot, which dials nobody.
+      //
+      // Deliberately NOT "is a token present": an expired token is retained after it dies, because
+      // it is the most useful thing to show a diagnosing operator, and a gauge that read presence
+      // as health would report 1 across exactly the outage it exists to reveal.
+      name: 'emberkin_service_token_usable',
+      help: '1 when this replica holds a service token it could present right now. 0 means every outbound call is answering 503.',
+      kind: 'gauge',
+      labels: [],
+    })
+    .register({
+      // 1 while this replica is running on a pre-minted `EMBERKIN_SERVICE_TOKEN`, which expires ten
+      // minutes after the boot that read it. This reaching zero across the estate is what says the
+      // compose change has landed everywhere and the variable may be deleted.
+      name: 'emberkin_service_token_static',
+      help: '1 when authenticating with a pre-minted token that cannot be renewed (micro-org #228). Should be 0 everywhere.',
+      kind: 'gauge',
+      labels: [],
     });
 }
 
