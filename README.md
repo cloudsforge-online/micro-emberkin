@@ -45,9 +45,16 @@ The rebrand is **lore-only**; the game was already accidentally set in the Cloud
 
 | In the game | In the estate |
 | --- | --- |
-| The world's floating **shards** | The internal currency, **Shards** |
+| The world's floating **shards** | Nothing. Scenery, and only scenery — see below |
 | The **ember** type / Cindercub of *Emberfall Vale* | The chain token **EMBER**, the **Hearth** chain |
 | **Aether**, the binding energy | The network the platform runs on |
+
+That row used to read "the internal currency, **Shards**", and the equation was wrong in both
+directions. In the game, shards are cosmology and a story item (`relic_shard`, `ice_shard`) — they
+are not a balance, nothing is priced in them and nothing pays out in them. In the estate, **SHARD
+is a retired asset**: not issuable, minted by nothing, and being drained. Mapping the two invited a
+reader to think the game earns a currency they could go and acquire, when neither half of that is
+true. The shared word is a coincidence of vocabulary and stays one.
 
 - **Title: Emberkin** (subtitle *Resonance* kept — it names the signature system).
 - **Kin, Wardens, Resonance, Temperament, Sync** are kept verbatim — the bond system is the product.
