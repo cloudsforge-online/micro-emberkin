@@ -56,14 +56,25 @@ jobs:
       # nothing in the smoke test verifies a signature or authenticates to anything, so both values
       # are generated per run by service-ci.yml and thrown away.
       #
-      # `@token` NEEDS micro-org's service-ci.yml AT OR AFTER 15a32a3. If this job fails with
-      # `EMBERKIN_SERVICE_TOKEN is not a minted service token`, the literal `@token` reached the
-      # container unsubstituted, which means the called workflow predates that commit.
+      # `@generate` and `@credential` NEED micro-org's service-ci.yml AT OR AFTER 15a32a3. If this
+      # job fails at the boot guard with an unsubstituted literal in the message, the called
+      # workflow predates that commit.
       #
       # AND RE-RUNNING WILL NOT FIX IT, which cost a red run to learn and is worth writing down: a
       # reusable workflow is resolved when the RUN IS CREATED, and `gh run rerun` replays that same
       # resolved version rather than re-reading `@main`. Only a new run — a fresh push — picks up a
       # change to the called workflow.
+      #
+      # THIS SMOKE TEST NOW BOOTS ON A CREDENTIAL AND NO TOKEN, which is micro-org #228 asserted as
+      # configuration rather than as prose. `EMBERKIN_SERVICE_TOKEN` used to be REQUIRED, so this
+      # exact environment could not have started the service before this change; that it now does is
+      # the proof that the ten-minute bearer is no longer how emberkin authenticates. `@credential`
+      # mints `cfsc_` + 43 base64url characters per run and throws it away, so the container holds a
+      # credential of the real SHAPE — nothing here exchanges it, because /livez dials no peer.
+      #
+      # The legacy `static` mode is not left uncovered: the `migrate` job below still boots on a
+      # generated `@token`-shaped JWT, so both branches of `requireOneCredentialSource` are exercised
+      # by this file and a rolling deploy that has not yet swapped the variable is proven to start.
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4001
@@ -71,7 +82,7 @@ jobs:
         LEDGER_URL=http://127.0.0.1:4007
         BILLING_URL=http://127.0.0.1:4009
         WORLDS_URL=http://127.0.0.1:4000
-        EMBERKIN_SERVICE_TOKEN=@token
+        EMBERKIN_IDENTITY_CREDENTIAL=@credential
     secrets:
       # @cloudsforge/* resolves via link:../runtime, so the workflow checks out micro-runtime
       # and micro-contracts as siblings — both private, hence a contents:read token.
@@ -130,6 +141,12 @@ jobs:
           jwt_s=$(openssl rand -base64 33 | tr '+/' '-_' | tr -d '=\n' | cut -c1-43)
           token="${jwt_h}.${jwt_p}.${jwt_s}"
           echo "::add-mask::$token"
+          # THIS JOB DELIBERATELY STAYS ON THE TOKEN while the smoke test above moved to the
+          # credential. Since micro-org #228 either variable satisfies the boot check, and a job
+          # that only ever proves the NEW one would let the migrator quietly stop starting for a
+          # container mid-rollout that still carries the old one. The migrator dials no upstream, so
+          # a token that expires in ten minutes costs it nothing — which is exactly why the `static`
+          # mode is safe to keep alive here and nowhere else.
           echo "EMBERKIN_SERVICE_TOKEN=$token" >> "$GITHUB_ENV"
       # Temporary: the three checkouts exist only because the runtime and contracts packages are
       # unpublished. On publish this collapses to one checkout.
@@ -226,6 +243,33 @@ jobs:
         run: |
           grep -q 'idempotency-key' src/server.ts \
             || { echo '::error::a battle submission no longer requires an Idempotency-Key; a retry re-applies'; exit 1; }
+
+      - name: The service token is EXCHANGED, not held for the life of the process
+        # micro-org #228. `servicetoken.test.ts` proves the refresh WORKS; this proves it is still
+        # THERE, and it is worth both because the regression is invisible: reverting to a constant
+        # token leaves every test green except that one, /livez green forever, and the failure ten
+        # minutes into a deployment on a player's purchase.
+        run: |
+          grep -q 'ServiceTokenProvider' src/upstreams.ts \
+            || { echo '::error::the token provider is gone; emberkin is back to one bearer read at boot (micro-org #228)'; exit 1; }
+          # The composition root must go THROUGH the module the test can reach. A second wiring
+          # built inline in index.ts is how this defect survived: no test could see it.
+          grep -q "buildUpstreams" src/index.ts \
+            || { echo '::error::index.ts no longer builds its upstreams through src/upstreams.ts, so no test covers its wiring'; exit 1; }
+          # The refresh point is the ISSUER'S number. A literal 600 here would be a second source of
+          # truth for a value identity owns, and it would drift the day identity changes its TTL.
+          # Comment lines are stripped first: the header EXPLAINS the 600 at length and must be able
+          # to say the number out loud without failing the guard that stops the code from holding it.
+          if grep -vE '^\s*(\*|//|/\*)' src/upstreams.ts | grep -nE '\b(600|600_000|10 \* 60)\b'; then
+            echo '::error::a hard-coded ten-minute lifetime appeared; the schedule must follow the exchange response expiresIn'
+            exit 1
+          fi
+          # Neither live credential may reach a log line, a metric label or stdout.
+          if grep -nE '(console\.|logger\.[a-z]+\([^)]*)(credential|serviceToken|\btoken\b)\s*[,)]' src/upstreams.ts; then
+            echo '::error::a credential or token looks like it is being logged; both are live credentials'
+            exit 1
+          fi
+          echo 'ok: the credential is exchanged, the schedule is the issuer'"'"'s, and neither value is logged'
 
   hygiene:
     uses: cloudsforge-online/micro-org/.github/workflows/secret-hygiene.yml@main

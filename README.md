@@ -68,10 +68,35 @@ If the RNG ever drifts, the corpus fails the build.
 
 ## What it talks to
 
-- **identity** — token verification (JWKS).
+- **identity** — token verification (JWKS), and the **service-token exchange** that authenticates
+  the three calls below.
 - **billing** — reads what an account owns, to gate a cosmetic equip (`billing:read`).
 - **ledger** — posts a season reward (`ledger:post`); the service keeps no balance.
 - **worlds** — posts achievements to the shared profile (`worlds:write`).
+
+### How the outbound calls authenticate
+
+All three present a **short-lived** bearer, and this service holds a **long-lived credential**
+(`EMBERKIN_IDENTITY_CREDENTIAL`, a `cfsc_…` value) rather than a token. `src/upstreams.ts` exchanges
+it at identity's `POST /service-tokens/exchange` and re-mints **before** the token expires, at a
+jittered fraction of whatever `expiresIn` that exchange answered with — the issuer owns that number,
+so a copy of it here would be a second source of truth waiting to drift. Refresh is driven by
+traffic, not a timer, and a refresh already in flight is shared rather than repeated.
+
+This replaces the defect in **micro-org #228**: the composition root used to read a **ten-minute
+token** once at boot and present it verbatim for the life of the process, so a replica authenticated
+for its first ten minutes and presented a dead token afterwards — with `/livez` green throughout,
+because `/livez` verifies nothing. A longer expiry was never the fix: expiry *is* the rotation.
+
+A refresh that fails is never presented as success. While a still-valid token is held the failure is
+a `warn` and callers see nothing; once there is no usable token, outbound calls raise the
+`…UnavailableError` class for their peer, which maps to **503, never 401** — "identity is
+unreachable" and "you are not allowed" are different answers and an operator has to be able to tell
+them apart. `emberkin_service_token_usable` reads 0 in exactly that state.
+
+`EMBERKIN_SERVICE_TOKEN` is still accepted so a container mid-rollout keeps booting, but it is a
+migration aid: the service logs `fatal` at boot while it is in use and
+`emberkin_service_token_static` reads 1. Exactly one of the two must be set.
 
 Outbound state changes go through a Postgres **outbox → signed HTTP → inbox** (deduped on the source
 event id); the inbound `POST /v1/events` webhook is signature-checked before it is parsed. All
