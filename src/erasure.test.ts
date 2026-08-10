@@ -133,13 +133,13 @@ async function playAsAlice(): Promise<void> {
 /** A season and a paid reward grant for `userId`, keyed exactly as `grantSeasonReward` keys it. */
 async function grantReward(userId: string, amount: string, journalEntryId: string): Promise<string> {
   const seasons = await sql<{ id: string }[]>`
-    insert into seasons (slug, name, starts_at, ends_at, status, reward_budget_shards, rewards_granted_shards)
+    insert into seasons (slug, name, starts_at, ends_at, status, reward_budget_wei, rewards_granted_wei)
     values (${`s-${journalEntryId}`}, 'S', now(), now() + interval '30 days', 'active', 100000, ${amount})
     returning id
   `;
   const seasonId = seasons[0]!.id;
   await sql`
-    insert into reward_grants (season_id, user_id, reason, amount_shards, journal_entry_id, idempotency_key)
+    insert into reward_grants (season_id, user_id, reason, amount_wei, journal_entry_id, idempotency_key)
     values (${seasonId}, ${userId}, 'season_pass:ent-9', ${amount}, ${journalEntryId},
             ${rewardIdempotencyKey(seasonId, userId, 'season_pass:ent-9')})
   `;
@@ -221,14 +221,14 @@ test('erasure: the reward grant SURVIVES, anonymised — the ledger record is in
     {
       user_id: string;
       journal_entry_id: string;
-      amount_shards: string;
+      amount_wei: string;
       reason: string;
       season_id: string;
       idempotency_key: string;
       user_erased_at: Date | null;
     }[]
   >`
-    select user_id, journal_entry_id, amount_shards::text as amount_shards, reason, season_id,
+    select user_id, journal_entry_id, amount_wei::text as amount_wei, reason, season_id,
            idempotency_key, user_erased_at
       from reward_grants
   `;
@@ -236,8 +236,8 @@ test('erasure: the reward grant SURVIVES, anonymised — the ledger record is in
   const grant = grants[0]!;
 
   assert.equal(grant.journal_entry_id, 'entry-77', 'the ledger entry that paid it is untouched');
-  assert.notEqual(grant.amount_shards, '', 'never BigInt("") — an empty numeric::text would read as 0n');
-  assert.equal(BigInt(grant.amount_shards), 500n, 'the amount is untouched');
+  assert.notEqual(grant.amount_wei, '', 'never BigInt("") — an empty numeric::text would read as 0n');
+  assert.equal(BigInt(grant.amount_wei), 500n, 'the amount is untouched');
   assert.equal(grant.reason, 'season_pass:ent-9', 'what the payment was for is untouched');
   assert.equal(grant.season_id, seasonId, 'it still reconciles against its season');
 
@@ -251,13 +251,13 @@ test('erasure: the reward grant SURVIVES, anonymised — the ledger record is in
 
   // The season total still matches the sum of the grants that remain — the whole reason to keep it.
   const season = await sql<{ granted: string; total: string }[]>`
-    select s.rewards_granted_shards::text as granted,
-           coalesce(sum(g.amount_shards), 0)::text as total
+    select s.rewards_granted_wei::text as granted,
+           coalesce(sum(g.amount_wei), 0)::text as total
       from seasons s left join reward_grants g on g.season_id = s.id
      where s.id = ${seasonId}
-     group by s.rewards_granted_shards
+     group by s.rewards_granted_wei
   `;
-  assert.equal(season[0]!.granted, season[0]!.total, 'seasons.rewards_granted_shards still reconciles');
+  assert.equal(season[0]!.granted, season[0]!.total, 'seasons.rewards_granted_wei still reconciles');
 });
 
 test('erasure: two grants for one user do not collide on the erased key', { skip }, async () => {

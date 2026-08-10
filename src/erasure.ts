@@ -33,7 +33,7 @@
  * |                       |                       | the local record of a LEDGER POSTING: real    |
  * |                       |                       | money moved, `journal_entry_id` names the     |
  * |                       |                       | entry that moved it, and the sum of these     |
- * |                       |                       | rows is what `seasons.rewards_granted_shards` |
+ * |                       |                       | rows is what `seasons.rewards_granted_wei`    |
  * |                       |                       | must continue to reconcile against. Deleting  |
  * |                       |                       | the row would silently break that             |
  * |                       |                       | reconciliation — the season would report      |
@@ -43,7 +43,7 @@
  * |                       |                       | random uuid, `idempotency_key` is rewritten   |
  * |                       |                       | (it embedded the id in plain text — see       |
  * |                       |                       | below), `user_erased_at` is stamped, and      |
- * |                       |                       | `amount_shards`, `journal_entry_id`,          |
+ * |                       |                       | `amount_wei`, `journal_entry_id`,             |
  * |                       |                       | `season_id` and `granted_at` are untouched.   |
  * |                       |                       | `reason` is kept: it names the ENTITLEMENT    |
  * |                       |                       | that triggered the payment, which is what the |
@@ -55,8 +55,8 @@
  * | `seasons`             | UNTOUCHED             | It holds no `user_id` — a season is an        |
  * |                       |                       | aggregate. It is also THE REASON the grants   |
  * |                       |                       | are kept rather than deleted:                 |
- * |                       |                       | `rewards_granted_shards` is a running total   |
- * |                       |                       | fenced by `seasons_within_budget`             |
+ * |                       |                       | `rewards_granted_wei` is a running total      |
+ * |                       |                       | fenced by `seasons_within_budget_wei`         |
  * |                       |                       | (migrations.ts), and deleting a grant     |
  * |                       |                       | would NOT decrement it. The total would then  |
  * |                       |                       | stand against no rows, the budget would still |
@@ -99,7 +99,7 @@
  *     that risk except for a job already leased by a running worker;
  *   - the ledger is idempotent on the same derived key, so even in that window no second payment is
  *     made — the ledger replays the stored entry;
- *   - the residual: that replay would still charge `seasons.rewards_granted_shards` a second time
+ *   - the residual: that replay would still charge `seasons.rewards_granted_wei` a second time
  *     and insert a second grant row. The window is one job lease, and the event arrives after
  *     identity's grace period, so in practice it is empty. It is a reconciliation risk, not a money
  *     risk, and it is the price of not leaving a uuid in a text column.

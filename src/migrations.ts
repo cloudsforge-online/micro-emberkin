@@ -10,9 +10,17 @@
  * sessions (so a battle resolves server-side from a seed and a retry replays), player achievements
  * bridged to worlds, and seasons whose rewards are budget-capped ledger postings.
  *
- * **There is deliberately no balance/shards column anywhere.** A cosmetic purchase is a billing
+ * **There is deliberately no balance column anywhere.** A cosmetic purchase is a billing
  * entitlement plus a ledger posting; this service records the equip, never a balance. That is the
- * "service holds no money" rule expressed as an absence you can grep for.
+ * "service holds no money" rule expressed as an absence you can grep for. The `_wei` columns on
+ * `seasons` and `reward_grants` are not an exception: a budget is a CAP on postings and a grant is
+ * a RECORD of one, and neither is spendable here.
+ *
+ * **Migrations 1-8 say `_shards` and mean it — do not "fix" them.** Migration 9 moved this
+ * programme from the retired SHARD to EMBER wei (micro-org#226), and `migrate()` checksums the
+ * FULL text of every `up` including its comments (runtime/packages/db, `checksumOf`). Editing a
+ * released migration — even its prose — makes two databases disagree about what version 7 was, and
+ * the migrator refuses to run at all. The old spellings below are history, not a to-do.
  */
 
 import { JOBS_SCHEMA_SQL } from '@cloudsforge/jobs';
@@ -273,6 +281,140 @@ export const MIGRATIONS: readonly Migration[] = [
       $$;
 
       drop trigger if exists reward_grants_one_way_erasure on reward_grants;
+      create trigger reward_grants_one_way_erasure
+        before update on reward_grants
+        for each row execute function reward_grants_erasure_is_one_way();
+    `,
+  },
+  {
+    version: 9,
+    name: 'engagement_in_ember_wei',
+    up: `
+      -- ══════════════════════════════════════════════════════════════════════════════════════════
+      -- **THIS SERVICE'S HALF OF THE ENGAGEMENT PROGRAMME MOVES OFF A RETIRED ASSET.**
+      -- micro-org#226.
+      --
+      -- Migration 7 gave a season a budget and every grant an amount, and denominated all three in
+      -- SHARD — which contracts-chain retired on 2026-08-04 (\`RETIRED_ASSETS\`, and
+      -- \`assertIssuable\` refuses it by name). The money that funds this programme is EMBER:
+      -- docs/ecosystem/21 §3 funds \`platform:engagement-treasury\` with mined EMBER arriving as an
+      -- ordinary deposit, and §2 has read "bounded, disclosed, and denominated in EMBER" since
+      -- 2026-08-07. So the programme was funded in one asset and spent in another, and a grant paid
+      -- in Shards could not be reconstructed against its funding. That is #226's title.
+      --
+      -- ── WHY THIS WAS URGENT RATHER THAN COSMETIC ─────────────────────────────────────────────
+      --
+      -- The ledger's retired-asset guard is scoped to ACQUISITION_KINDS — purchase,
+      -- subscription_charge, deposit_credited — and deliberately so, because the kinds that let the
+      -- 69,000 SHARD in live accounts get OUT must stay legal. \`reward_granted\` is in neither
+      -- group, so a SHARD reward would NOT have been refused: it would have raised a user liability
+      -- in SHARD with no custody behind it, put Σliabilities past Σcustody, and frozen SHARD
+      -- withdrawals on a drift only an ISSUANCE could clear — which \`assertIssuable\` refuses. See
+      -- the header of src/ledgerclient.ts for the full chain. The failure mode was a silent 201,
+      -- not an error, which is why this moves before the programme is switched on.
+      --
+      -- ── WHAT IS ACTUALLY IN THE TABLES, MEASURED RATHER THAN ASSUMED ─────────────────────────
+      --
+      -- Live mainnet, 2026-08-10, read off cloudsforge-estate-postgres-1 (database \`emberkin\`):
+      --
+      --     seasons             1 row  — slug 'season-688', status 'active', opened 2026-08-04,
+      --                                  reward_budget_shards 100000, rewards_granted_shards 0
+      --     reward_grants       0 rows
+      --     ledger accounts whose subject matches 'engagement', any asset           0
+      --     ledger journal entries of kind reward_granted, ever                     0
+      --
+      -- So exactly one row converts, and it is the season the rollover job opened for itself out of
+      -- the default budget — no operator ever chose that 100000, and nothing has ever been paid
+      -- from it. There is no balance in flight and no history to restate, which is why the columns
+      -- are RENAMED rather than added beside the old ones and back-filled: expand/contract exists to
+      -- protect data in flight and there is none, while a second set of columns would leave two
+      -- spellings of one budget.
+      --
+      -- ── THE CONVERSION, AND WHY THE RATE IS FROZEN HERE ──────────────────────────────────────
+      --
+      -- This is a real conversion and not a relabelling: SHARD has 0 decimals and EMBER has 18, so
+      -- the same integer means two things eighteen orders of magnitude apart. The rate is two
+      -- recorded facts, each read again on 2026-08-10:
+      --
+      --     one Shard is exactly one US cent    the documented peg, SHARDS_PER_USD = 100n
+      --                                         (contracts/packages/chain)
+      --     one EMBER is 0.25 USD               pricing.administered_prices, asset 'EMBER',
+      --                                         usd_scaled 250000 against RATE_SCALE 1e6, set_by
+      --                                         null, updated_at 2026-08-04 15:05:07 UTC
+      --
+      -- so one Shard is 0.04 EMBER, and 0.04e18 = 40000000000000000 wei. The live season's 100000
+      -- Shards therefore becomes 4e21 wei — 4,000 EMBER — which is the same money it always named.
+      --
+      -- The literal is FROZEN INTO THIS MIGRATION on purpose, and admin-api's migration 13 and
+      -- worlds' migration 11 freeze the identical constant. EMBER's price is administered — one
+      -- operator-editable row — and a stored figure that re-read it would restate itself every time
+      -- somebody edited that number. A migration is the one place the rate may appear, because a
+      -- migration runs ONCE and is checksummed afterwards.
+      --
+      -- ── WHAT DOES NOT CHANGE ─────────────────────────────────────────────────────────────────
+      --
+      -- All three columns are ALREADY numeric(78,0) — verified against the live database on
+      -- 2026-08-10, not merely read off migration 7 — so nothing widens and no type changes. 4e21
+      -- needs 22 digits of the 78 available. Every constraint and index keeps its rule and its
+      -- strength; only the column it names moves.
+      -- ══════════════════════════════════════════════════════════════════════════════════════════
+
+      -- ── THE ERASURE TRIGGER COMES OFF FIRST ──────────────────────────────────────────────────
+      --
+      -- \`reward_grants_one_way_erasure\` is a BEFORE UPDATE trigger on reward_grants (migration 8),
+      -- so the conversion UPDATE below fires it once per grant row — including on ERASED rows,
+      -- which take the branch that raises.
+      --
+      -- **This drop is DEFENSIVE, and that is a measurement rather than a hedge.** The replay test
+      -- in migrations.test.ts was re-run on 2026-08-10 with this drop and the recreate below
+      -- removed, and it PASSED: migration 8's body names only user_id, user_erased_at and id, none
+      -- of which move here, so unlike micro-worlds' budget trigger it does not raise 'record "new"
+      -- has no field ...'. It comes off anyway. plpgsql resolves record fields at EXECUTION time,
+      -- so that pass is a property of the body as it stands TODAY, not a guarantee; a migration
+      -- that silently depends on the current text of a trigger it does not own is a migration that
+      -- breaks when somebody edits that trigger, and it breaks in the one place — a released,
+      -- checksummed file — where the fix is another migration.
+      --
+      -- So the trigger comes off, the data is restated, and it goes back on with its rule verbatim.
+      -- The window is inside one migration, which is inside one transaction.
+      drop trigger if exists reward_grants_one_way_erasure on reward_grants;
+
+      alter table seasons       rename column reward_budget_shards   to reward_budget_wei;
+      alter table seasons       rename column rewards_granted_shards to rewards_granted_wei;
+      alter table reward_grants rename column amount_shards          to amount_wei;
+
+      -- 100 Shards to the dollar and 0.25 USD to the EMBER: 1 Shard = 4e16 wei. See above.
+      update seasons       set reward_budget_wei   = reward_budget_wei   * 40000000000000000,
+                               rewards_granted_wei = rewards_granted_wei * 40000000000000000;
+      update reward_grants set amount_wei          = amount_wei          * 40000000000000000;
+
+      -- Postgres carries a CHECK across a column rename, so these are renamed for the READER rather
+      -- than rebuilt: a constraint called '..._shards' guarding a column called '..._wei' is a
+      -- refusal message naming the wrong unit at the exact moment somebody is debugging money.
+      alter table seasons       rename constraint seasons_budget_positive
+                                               to seasons_budget_wei_positive;
+      alter table seasons       rename constraint seasons_within_budget
+                                               to seasons_within_budget_wei;
+      alter table reward_grants rename constraint reward_grants_amount_positive
+                                               to reward_grants_amount_wei_positive;
+
+      -- Back on, with the timing and the rule migration 8 gave it. Restated in full because
+      -- 'create or replace function' has no partial form; not one line of the body differs.
+      create or replace function reward_grants_erasure_is_one_way() returns trigger
+      language plpgsql as $$
+      begin
+        if old.user_erased_at is not null then
+          if new.user_id is distinct from old.user_id then
+            raise exception 'reward_grants: an erased grant cannot be re-attributed to a person (grant %)', old.id;
+          end if;
+          if new.user_erased_at is null then
+            raise exception 'reward_grants: an erasure cannot be undone (grant %)', old.id;
+          end if;
+        end if;
+        return new;
+      end;
+      $$;
+
       create trigger reward_grants_one_way_erasure
         before update on reward_grants
         for each row execute function reward_grants_erasure_is_one_way();

@@ -41,7 +41,7 @@ function periodSlug(now: Date): string {
 export async function ensureActiveSeason(
   sql: Db,
   producer: string,
-  budgetShards: bigint,
+  budgetWei: bigint,
   now: Date,
   withOutbox: <T>(sql: Db, producer: string, fn: (tx: Tx, emit: Emit) => Promise<T>) => Promise<T>,
 ): Promise<string> {
@@ -52,8 +52,8 @@ export async function ensureActiveSeason(
   const ends = new Date(now.getTime() + SEASON_DAYS * 86_400_000);
   return withOutbox(sql, producer, async (tx, emit) => {
     const rows = await tx<{ id: string }[]>`
-      insert into seasons (slug, name, starts_at, ends_at, status, reward_budget_shards)
-      values (${slug}, ${'Emberkin ' + slug}, ${now.toISOString()}, ${ends.toISOString()}, 'active', ${budgetShards.toString()})
+      insert into seasons (slug, name, starts_at, ends_at, status, reward_budget_wei)
+      values (${slug}, ${'Emberkin ' + slug}, ${now.toISOString()}, ${ends.toISOString()}, 'active', ${budgetWei.toString()})
       on conflict (slug) do nothing
       returning id
     `;
@@ -98,19 +98,19 @@ export async function grantSeasonReward(
   const key = rewardIdempotencyKey(input.seasonId, input.userId, input.reason);
 
   return withOutbox(sql, producer, async (tx, emit) => {
-    const prior = await tx<{ journal_entry_id: string; amount_shards: string }[]>`
-      select journal_entry_id, amount_shards::text as amount_shards from reward_grants where idempotency_key = ${key}
+    const prior = await tx<{ journal_entry_id: string; amount_wei: string }[]>`
+      select journal_entry_id, amount_wei::text as amount_wei from reward_grants where idempotency_key = ${key}
     `;
     if (prior[0]) {
-      return { journalEntryId: prior[0].journal_entry_id, amount: BigInt(prior[0].amount_shards), replayed: true };
+      return { journalEntryId: prior[0].journal_entry_id, amount: BigInt(prior[0].amount_wei), replayed: true };
     }
 
     // Charge the budget FIRST, conditionally. No row => over budget, and the ledger is never touched.
     const charged = await tx<{ id: string }[]>`
       update seasons
-         set rewards_granted_shards = rewards_granted_shards + ${input.amount.toString()}, updated_at = now()
+         set rewards_granted_wei = rewards_granted_wei + ${input.amount.toString()}, updated_at = now()
        where id = ${input.seasonId}
-         and rewards_granted_shards + ${input.amount.toString()} <= reward_budget_shards
+         and rewards_granted_wei + ${input.amount.toString()} <= reward_budget_wei
       returning id
     `;
     if (!charged[0]) {
@@ -129,7 +129,7 @@ export async function grantSeasonReward(
     });
 
     await tx`
-      insert into reward_grants (season_id, user_id, reason, amount_shards, journal_entry_id, idempotency_key)
+      insert into reward_grants (season_id, user_id, reason, amount_wei, journal_entry_id, idempotency_key)
       values (${input.seasonId}, ${input.userId}, ${input.reason}, ${input.amount.toString()}, ${entry.id}, ${key})
     `;
 

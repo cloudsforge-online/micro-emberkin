@@ -31,8 +31,15 @@ export const SEASON_ROLLOVER_KIND = 'season.rollover';
 /** Grants a season pass its welcome reward, keyed by the entitlement so it pays once. */
 export const SEASON_REWARD_KIND = 'season.reward';
 
-/** The welcome reward a season pass grants, in Shards. A modest, budget-capped amount. */
-export const WELCOME_REWARD_SHARDS = 500n;
+/**
+ * The welcome reward a season pass grants, in EMBER wei. A modest, budget-capped amount.
+ *
+ * 20 EMBER. This was `WELCOME_REWARD_SHARDS = 500n` until micro-org#226, and the figure is the
+ * same money CONVERTED, not relabelled: 500 Shards at 100 Shards to the USD (SHARDS_PER_USD) is
+ * USD 5, and at EMBER's administered 0.25 USD that is 20 EMBER — 2e19 wei, the frozen rate
+ * migration 9 uses. Grouped so the eighteen zeroes can be counted rather than trusted.
+ */
+export const WELCOME_REWARD_WEI = 20_000_000_000_000_000_000n;
 
 export interface JobDeps {
   readonly sql: Db;
@@ -42,7 +49,7 @@ export interface JobDeps {
   readonly ledger: LedgerClient;
   readonly producer: string;
   readonly signingSecret: string;
-  readonly seasonBudgetShards: bigint;
+  readonly seasonBudgetWei: bigint;
   readonly queue: Pick<JobQueue, 'enqueue'>;
 }
 
@@ -84,7 +91,7 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): void {
   });
 
   runner.register(SEASON_ROLLOVER_KIND, async () => {
-    await ensureActiveSeason(deps.sql, deps.producer, deps.seasonBudgetShards, new Date(), withOutbox);
+    await ensureActiveSeason(deps.sql, deps.producer, deps.seasonBudgetWei, new Date(), withOutbox);
   });
 
   runner.register<{ userId?: string; entitlementId?: string; amount?: string }>(
@@ -93,8 +100,8 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): void {
       const userId = job.payload.userId;
       const entitlementId = job.payload.entitlementId ?? job.key;
       if (!userId) return;
-      const amount = job.payload.amount ? BigInt(job.payload.amount) : WELCOME_REWARD_SHARDS;
-      const seasonId = await ensureActiveSeason(deps.sql, deps.producer, deps.seasonBudgetShards, new Date(), withOutbox);
+      const amount = job.payload.amount ? BigInt(job.payload.amount) : WELCOME_REWARD_WEI;
+      const seasonId = await ensureActiveSeason(deps.sql, deps.producer, deps.seasonBudgetWei, new Date(), withOutbox);
       try {
         await grantSeasonReward(
           deps.sql,

@@ -11,7 +11,20 @@
 import { HttpClient, HttpError } from '@cloudsforge/http';
 import { engagementAccount } from '@cloudsforge/contracts-money';
 import type { Actor, EntryKind, LedgerAssetCode } from '@cloudsforge/contracts-money';
+import type { IssuableAssetCode } from '@cloudsforge/contracts-chain';
 import type { LiveScope } from '@cloudsforge/contracts-auth';
+
+/**
+ * The asset a season reward is denominated in, spelled once.
+ *
+ * `IssuableAssetCode` — `Exclude<AssetCode, 'SHARD'>` in contracts-chain — and not `string` or
+ * `LedgerAssetCode`, which both still admit `'SHARD'` because the ledger goes on SUPERVISING the
+ * retired asset it may no longer issue. That is the type `micro-mint` and `micro-admin-api` reached
+ * for when they moved their own halves of this programme, and the reason is the same: a build that
+ * tried to route a reward back through a retired asset would NOT COMPILE, which is a different and
+ * stronger thing than a comment asking it not to.
+ */
+export const ENGAGEMENT_ASSET: IssuableAssetCode = 'EMBER';
 
 /**
  * The scopes this service's token must carry to call this peer.
@@ -108,9 +121,46 @@ export interface LedgerClient {
  * `equity` is load-bearing beyond the collision. The ledger's overdraft trigger exempts `clearing`
  * and `suspense` and NOT `equity` (ledger/src/migrations.ts, `ledger_assert_no_overdraft`), so a
  * reward that would take `engagement:emberkin` negative is refused BY THE LEDGER.
- * `seasons.reward_budget_shards` stays the CAP; the engagement balance is the FUNDING, and the two
+ * `seasons.reward_budget_wei` stays the CAP; the engagement balance is the FUNDING, and the two
  * are different questions. The account is funded only by operator-approved `engagement.transfer`
  * actions in `micro-admin-api`.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * **BOTH LEGS ARE EMBER, AND THEY WERE SHARD UNTIL micro-org#226.**
+ *
+ * §4's promise is a promise about ONE programme, and it holds only if the leg that FUNDS the
+ * account and the leg that SPENDS it are the same asset. §3 funds `platform:engagement-treasury`
+ * with mined EMBER arriving as an ordinary deposit, and §2 has read "bounded, disclosed, and
+ * denominated in EMBER" since 2026-08-07. This function went on posting SHARD, which
+ * contracts-chain retired on 2026-08-04 (`RETIRED_ASSETS`) and `assertIssuable` refuses by name.
+ *
+ * **The danger was not that this would fail. It was that it would SUCCEED.** The ledger's
+ * retired-asset gate is scoped to `ACQUISITION_KINDS` — `purchase`, `subscription_charge`,
+ * `deposit_credited` (ledger/src/entries.ts) — and deliberately so, because every kind by which
+ * the 69,000 SHARD still sitting in live accounts gets OUT has to stay legal. `reward_granted` is
+ * in neither group, so a SHARD reward posted straight through:
+ *
+ *   1. the credit leg raises a user LIABILITY in SHARD, with no custody asset behind it, because
+ *      there is no SHARD chain to hold any and the treasury leg is `equity`, not custody;
+ *   2. Σliabilities then exceeds Σcustody for SHARD, which IS reconciliation drift;
+ *   3. `withinTolerance` fails CLOSED on an asset with no configured tolerance, and
+ *      `LEDGER_RECONCILE_TOLERANCE` names no SHARD entry, so the drift is out of tolerance;
+ *   4. that freezes SHARD withdrawals, and only a `clean` run lifts a freeze (ledger/reconcile.ts)
+ *      — which would need the missing custody backing to be ISSUED, which `assertIssuable`
+ *      refuses by name.
+ *
+ * So the first engagement reward ever paid to a player in SHARD would have frozen the asset for
+ * all 69 accounts holding it, unliftably, and it would have done so QUIETLY — a `201 Created` on
+ * the way in. That is why this had to move before the programme was ever switched on, and not
+ * after somebody noticed a number looked wrong.
+ *
+ * Nothing has run through it yet. Measured on live mainnet 2026-08-10: 0 ledger accounts whose
+ * subject matches `engagement` in any asset, and 0 journal entries of kind `reward_granted` ever.
+ * The window was still open, which is the only reason this is a change rather than an incident.
+ *
+ * The player's side is `available`/`liability` in EMBER, a balance this estate's accounts already
+ * hold and one the withdrawal path already knows how to pay out.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 export function rewardPostings(input: { readonly subject: string; readonly amount: bigint }): readonly PostingRequest[] {
@@ -120,21 +170,26 @@ export function rewardPostings(input: { readonly subject: string; readonly amoun
       // (subject, asset_code, purpose), so a second spelling would be a second account and would
       // split this programme's ledger in half.
       account: {
-        subject: engagementAccount('emberkin', 'SHARD').subject,
-        assetCode: 'SHARD',
+        subject: engagementAccount('emberkin', ENGAGEMENT_ASSET).subject,
+        assetCode: ENGAGEMENT_ASSET,
         purpose: 'treasury',
         type: 'equity',
       },
       direction: 'debit',
       amount: input.amount,
-      assetCode: 'SHARD',
+      assetCode: ENGAGEMENT_ASSET,
       sequence: 0,
     },
     {
-      account: { subject: input.subject, assetCode: 'SHARD', purpose: 'available', type: 'liability' },
+      account: {
+        subject: input.subject,
+        assetCode: ENGAGEMENT_ASSET,
+        purpose: 'available',
+        type: 'liability',
+      },
       direction: 'credit',
       amount: input.amount,
-      assetCode: 'SHARD',
+      assetCode: ENGAGEMENT_ASSET,
       sequence: 1,
     },
   ];
