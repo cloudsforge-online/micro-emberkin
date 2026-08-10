@@ -279,8 +279,17 @@ export function httpWorldsClient(options: WorldsClientOptions): WorldsClient {
               // of what this service knows about it.
               description: '',
               points: post.points,
-              // This service awards no Shards through a badge: a reward is a ledger entry made by
-              // its own path. `0n` is a truthful statement of that, not a placeholder.
+              // This service awards nothing through a BADGE: a reward is a ledger entry made by
+              // its own path. `0n` is a truthful statement of that, not a placeholder — and it is
+              // why micro-org#226 did not have to touch this call. The unit never mattered here,
+              // because the quantity is always zero.
+              //
+              // **The field keeps its name deliberately.** `rewardShards` is
+              // `AchievementDefinition` in the shared @cloudsforge/contracts-worlds package, which
+              // four repositories build against; renaming it from here would turn them red.
+              // micro-worlds' route already accepts `rewardWei` and converts a legacy
+              // `rewardShards` at the frozen rate, so the wire migrates on the contract's
+              // schedule, not this service's. Residual, tracked on #226.
               rewardShards: 0n,
             }),
             requestId: post.correlationId,

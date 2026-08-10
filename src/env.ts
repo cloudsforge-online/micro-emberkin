@@ -11,9 +11,10 @@
  *   2. A known placeholder is refused outright — a default secret that boots is a default secret
  *      that reaches production.
  *
- * `EMBERKIN_SEASON_REWARD_BUDGET_SHARDS` is a MONEY CONTROL, not a tuning knob: season rewards are
+ * `EMBERKIN_SEASON_REWARD_BUDGET_WEI` is a MONEY CONTROL, not a tuning knob: season rewards are
  * ledger postings, so a game exploit that mints rewards is a money incident, and the cap is checked
- * in the same transaction as the posting.
+ * in the same transaction as the posting. It was `..._SHARDS` until micro-org#226 moved the
+ * programme off the retired asset; the old name is REFUSED below rather than ignored.
  */
 
 import { hostname } from 'node:os';
@@ -248,10 +249,19 @@ function integer(source: Source, name: string, fallback: number, min: number, ma
   return value;
 }
 
-function shards(source: Source, name: string, fallback: bigint): bigint {
+/**
+ * A quantity of EMBER wei as a decimal string, never a number.
+ *
+ * A budget is money. Reading it through `Number()` would make a large one approximate, and an
+ * approximate cap is either slightly too generous or refuses a legitimate grant — both discovered
+ * by a player rather than by a test. At 18 decimals this stopped being a precaution against an
+ * unusually large figure and became the only reading that works at all: the default below is
+ * 4e21, which is past `Number.MAX_SAFE_INTEGER` by three orders of magnitude.
+ */
+function wei(source: Source, name: string, fallback: bigint): bigint {
   const raw = source[name]?.trim();
   if (!raw) return fallback;
-  if (!/^\d+$/.test(raw)) throw new EnvError(`${name} must be a whole number of shards (got ${raw})`);
+  if (!/^\d+$/.test(raw)) throw new EnvError(`${name} must be a whole number of wei (got ${raw})`);
   return BigInt(raw);
 }
 
@@ -336,8 +346,13 @@ export interface Env {
   readonly serviceToken: string | null;
   readonly upstreamDeadlineMs: number;
 
-  /** The default reward budget a new Emberkin season is opened with, in Shards. */
-  readonly seasonRewardBudgetShards: bigint;
+  /**
+   * The default reward budget a new Emberkin season is opened with, in EMBER wei.
+   *
+   * A season may be given its own on creation; this is what one gets when nobody says. It is
+   * deliberately small — a budget nobody chose should bind long before it costs anything.
+   */
+  readonly seasonRewardBudgetWei: bigint;
 }
 
 const LEVELS = new Set(['debug', 'info', 'warn', 'error']);
@@ -374,8 +389,39 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
   if (!LEVELS.has(logLevel)) {
     throw new EnvError(`LOG_LEVEL must be one of debug, info, warn, error (got ${logLevel})`);
   }
-  const budget = shards(source, 'EMBERKIN_SEASON_REWARD_BUDGET_SHARDS', 100_000n);
-  if (budget <= 0n) throw new EnvError('EMBERKIN_SEASON_REWARD_BUDGET_SHARDS must be positive');
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // EMBERKIN_SEASON_REWARD_BUDGET_SHARDS IS REFUSED, NOT ACCEPTED-AND-IGNORED. micro-org#226.
+  //
+  // The same shape micro-worlds and micro-mint used when they retired their own Shard-denominated
+  // knobs, and for the same reason: a deployment still setting the old name is asserting a budget
+  // in a unit this build no longer has. Accepting it silently would fall back to the default below
+  // — a budget NOBODY CHOSE, presented as one somebody did — and the number would be wrong by
+  // eighteen orders of magnitude in the direction of generosity. It is refused where it is named.
+  //
+  // This costs nothing to ship. Neither name is set anywhere, measured two ways on 2026-08-10:
+  // `docker inspect cloudsforge-estate-emberkin-1` lists neither in the RUNNING container's
+  // environment, and neither appears anywhere under deploy/compose. Mainnet has always run on the
+  // default, so this refusal cannot fire there. (The .env.example comment used to justify keeping
+  // the old name by saying it "is set on the estate" — it is not, and that is now measured.)
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  if ((source['EMBERKIN_SEASON_REWARD_BUDGET_SHARDS'] ?? '').trim().length > 0) {
+    throw new EnvError(
+      'EMBERKIN_SEASON_REWARD_BUDGET_SHARDS is retired with the asset it names. Set ' +
+        'EMBERKIN_SEASON_REWARD_BUDGET_WEI instead — it is EMBER wei, so the same money is a ' +
+        'different number (21 §2, micro-org#226)',
+    );
+  }
+  // 4,000 EMBER: the 100,000 Shards this defaulted to before #226, CONVERTED at the two recorded
+  // rates rather than relabelled. 100 Shards to the USD (SHARDS_PER_USD) makes it USD 1,000, and
+  // EMBER's administered price of 0.25 USD (pricing.administered_prices, usd_scaled 250000,
+  // unchanged since 2026-08-04 and read again on 2026-08-10) makes that 4,000 EMBER. It is the
+  // same figure migration 9 converts the one live season row to, which is deliberate: a season
+  // opened before the migration and a season opened after it get the same budget. The literal is
+  // grouped so a reader can count the eighteen zeroes without trusting an exponent.
+  const budget = wei(source, 'EMBERKIN_SEASON_REWARD_BUDGET_WEI', 4_000_000_000_000_000_000_000n);
+  // Zero would be a season that can pay nothing, which is a configuration mistake presenting as
+  // "every reward is refused". Refused here, where the variable is named.
+  if (budget <= 0n) throw new EnvError('EMBERKIN_SEASON_REWARD_BUDGET_WEI must be positive');
   // Read before the object literal because the accept list falls back to it.
   const outboxSigningSecret = requiredSigningSecret(source, 'OUTBOX_SIGNING_SECRET');
   // Read before the object literal because neither is valid alone-and-absent: the pair is what is
@@ -411,7 +457,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     serviceToken,
     upstreamDeadlineMs: integer(source, 'EMBERKIN_UPSTREAM_DEADLINE_MS', 5_000, 100, 60_000),
 
-    seasonRewardBudgetShards: budget,
+    seasonRewardBudgetWei: budget,
   };
 }
 

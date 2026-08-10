@@ -74,7 +74,7 @@ test('env: a valid environment loads', () => {
   const env = loadEnv(BASE, 'host-1');
   assert.equal(env.port, 4100);
   assert.equal(env.databaseUrl, BASE.EMBERKIN_DATABASE_URL);
-  assert.equal(env.seasonRewardBudgetShards, 100_000n);
+  assert.equal(env.seasonRewardBudgetWei, 4_000_000_000_000_000_000_000n);
   assert.equal(env.instanceId, 'host-1');
 });
 
@@ -221,12 +221,50 @@ test('THE VALUE THAT SAT IN A PUBLIC REPOSITORY IS REFUSED — micro-org #142/#2
 });
 
 test('env: a non-positive reward budget is refused', () => {
-  assert.throws(() => loadEnv({ ...BASE, EMBERKIN_SEASON_REWARD_BUDGET_SHARDS: '0' }), EnvError);
+  assert.throws(() => loadEnv({ ...BASE, EMBERKIN_SEASON_REWARD_BUDGET_WEI: '0' }), EnvError);
 });
 
 test('env: the budget is read as a bigint, never a float', () => {
-  const env = loadEnv({ ...BASE, EMBERKIN_SEASON_REWARD_BUDGET_SHARDS: '9007199254740993' });
-  assert.equal(env.seasonRewardBudgetShards, 9007199254740993n);
+  // Past Number.MAX_SAFE_INTEGER, which at 18 decimals is where every real budget lives: the
+  // DEFAULT is already 4e21. Read through Number() this would come back as ...992.
+  const env = loadEnv({ ...BASE, EMBERKIN_SEASON_REWARD_BUDGET_WEI: '9007199254740993' });
+  assert.equal(env.seasonRewardBudgetWei, 9007199254740993n);
+});
+
+/**
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * **THE RETIRED VARIABLE IS REFUSED, NOT IGNORED.** micro-org#226.
+ *
+ * The tempting alternative is to accept EMBERKIN_SEASON_REWARD_BUDGET_SHARDS and quietly ignore
+ * it. That is worse than either extreme: the service would boot on the DEFAULT budget while an
+ * operator who had deliberately set a cap believed theirs was in force — a budget nobody chose,
+ * presented as one somebody did, and wrong by eighteen orders of magnitude in the direction of
+ * generosity. Refusing at boot turns a silent money-control failure into a failed deploy.
+ *
+ * Safe to ship because nothing sets it: measured 2026-08-10 against the RUNNING container
+ * (`docker inspect cloudsforge-estate-emberkin-1`) and across deploy/compose. Neither name is
+ * present, so mainnet has always run on the default and this cannot fire there.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+test('env: the retired _SHARDS budget variable is refused by name', () => {
+  assert.throws(
+    () => loadEnv({ ...BASE, EMBERKIN_SEASON_REWARD_BUDGET_SHARDS: '100000' }),
+    (err: unknown) =>
+      err instanceof EnvError &&
+      /EMBERKIN_SEASON_REWARD_BUDGET_SHARDS is retired/.test(err.message) &&
+      // The message must name the replacement. An operator reading a failed boot needs the next
+      // action, not just the verdict.
+      /EMBERKIN_SEASON_REWARD_BUDGET_WEI/.test(err.message),
+  );
+});
+
+test('env: the retired variable set to empty or whitespace is not treated as set', () => {
+  // A compose file that renders `EMBERKIN_SEASON_REWARD_BUDGET_SHARDS=` from an unset
+  // interpolation must not brick the boot. Absent and empty mean the same thing: nobody asked.
+  for (const value of ['', '   ']) {
+    const env = loadEnv({ ...BASE, EMBERKIN_SEASON_REWARD_BUDGET_SHARDS: value });
+    assert.equal(env.seasonRewardBudgetWei, 4_000_000_000_000_000_000_000n);
+  }
 });
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────

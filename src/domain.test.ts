@@ -224,7 +224,7 @@ test('season: a reward posts to the ledger, is budget-capped, and replays on ret
     () => grantSeasonReward(db, 'emberkin', ledger, { seasonId, userId: BOB, reason: 'pass:e2', amount: 900n, correlationId: 'c3' }, withOutbox),
     BudgetExceededError,
   );
-  const rows = await sql<{ granted: string }[]>`select rewards_granted_shards::text as granted from seasons where id = ${seasonId}`;
+  const rows = await sql<{ granted: string }[]>`select rewards_granted_wei::text as granted from seasons where id = ${seasonId}`;
   assert.equal(rows[0]!.granted, '400'); // the over-budget grant charged nothing
 });
 

@@ -13,8 +13,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { engagementAccount } from '@cloudsforge/contracts-money';
+import { assertIssuable, isRetiredAsset, type AssetCode } from '@cloudsforge/contracts-chain';
 
-import { rewardPostings, rewardIdempotencyKey } from './ledgerclient.ts';
+import { ENGAGEMENT_ASSET, rewardPostings, rewardIdempotencyKey } from './ledgerclient.ts';
 
 test('reward: the debit side is engagement:emberkin / treasury / equity', () => {
   const postings = rewardPostings({ subject: 'user:alice', amount: 500n });
@@ -22,7 +23,7 @@ test('reward: the debit side is engagement:emberkin / treasury / equity', () => 
   assert.ok(debit, 'a reward must have a debit side');
 
   // Spelled by contracts-money so a second spelling cannot split the programme's ledger.
-  assert.equal(debit.account.subject, engagementAccount('emberkin', 'SHARD').subject);
+  assert.equal(debit.account.subject, engagementAccount('emberkin', ENGAGEMENT_ASSET).subject);
   assert.equal(debit.account.subject, 'engagement:emberkin');
   assert.equal(debit.account.purpose, 'treasury');
 
@@ -64,8 +65,52 @@ test('reward: the credit side is the player, and the entry balances', () => {
   assert.equal(debits, credits);
   assert.equal(debits, 500n);
 
-  // Every posting is SHARD, so "balances per asset" and "balances" are the same statement here.
-  assert.deepEqual([...new Set(postings.map((p) => p.assetCode))], ['SHARD']);
+  // Every posting is one asset, so "balances per asset" and "balances" are the same statement.
+  assert.deepEqual([...new Set(postings.map((p) => p.assetCode))], ['EMBER']);
+});
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **NO LEG MAY BE DENOMINATED IN A RETIRED ASSET.** micro-org#226.
+ *
+ * The type system already refuses this — `ENGAGEMENT_ASSET` is `IssuableAssetCode`, which is
+ * `Exclude<AssetCode, 'SHARD'>` — and that is the primary guard, because it fails at build time.
+ * This test exists for the case the type cannot see: a leg whose `assetCode` is written as a
+ * literal beside the constant rather than through it, which is precisely the shape this function
+ * had before #226 (`assetCode: 'SHARD'` spelled four times, next to a subject built from it).
+ *
+ * It asserts against the retired list rather than against the string 'SHARD', so an asset retired
+ * NEXT year is caught by this test without anybody remembering to come back and edit it.
+ *
+ * What made the old spelling dangerous is worth restating where somebody might be tempted to
+ * revert it: the ledger's retired-asset guard covers ACQUISITION_KINDS only, and `reward_granted`
+ * is not one, so a SHARD reward would have posted successfully — raising a user liability with no
+ * custody behind it, and freezing SHARD withdrawals on a drift that only an issuance could clear.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+test('reward: not one leg is denominated in a retired asset', () => {
+  const postings = rewardPostings({ subject: 'user:alice', amount: 500n });
+  assert.ok(postings.length > 0, 'a reward must post something');
+
+  for (const posting of postings) {
+    assert.equal(
+      isRetiredAsset(posting.assetCode as AssetCode),
+      false,
+      `posting ${posting.sequence} is denominated in the retired ${posting.assetCode}`,
+    );
+    // The ACCOUNT's asset too, not just the posting's. They are separate fields, and the account
+    // key is (subject, asset_code, purpose) — an account opened in a retired asset is a retired
+    // balance whichever unit the posting beside it claims.
+    assert.equal(
+      isRetiredAsset(posting.account.assetCode as AssetCode),
+      false,
+      `posting ${posting.sequence} names an account in the retired ${posting.account.assetCode}`,
+    );
+  }
+
+  // And the constant itself is issuable — `assertIssuable` throws on anything retired, so this
+  // pins the declared asset rather than only the postings that happen to use it today.
+  assert.equal(assertIssuable(ENGAGEMENT_ASSET), 'EMBER');
 });
 
 test('reward: the idempotency key is derived from (season, user, reason)', () => {

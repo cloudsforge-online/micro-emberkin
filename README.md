@@ -26,7 +26,7 @@ integration. The Three.js client (`micro-emberkin-web`) is a separate, later rep
 - **Worlds integration** — Resonance milestones and dex completion become shared-profile
   achievements (a leased delivery job), monetisation is cosmetics + season passes as **billing
   entitlements** (never stat advantage), and a season's rewards are **budget-capped ledger
-  postings**. This service holds no money and has no balance column.
+  postings denominated in EMBER**. This service holds no money and has no balance column.
 
 ## What it ports from kindred-resonance, and the rebrand
 
@@ -56,6 +56,12 @@ is a retired asset**: not issuable, minted by nothing, and being drained. Mappin
 reader to think the game earns a currency they could go and acquire, when neither half of that is
 true. The shared word is a coincidence of vocabulary and stays one.
 
+The estate half of that separation is now finished too. Until micro-org#226 this service's season
+budgets and reward grants really were denominated in SHARD — the retired asset — while the
+programme funding them is EMBER. Migration 9 converted the columns (`reward_budget_wei`,
+`rewards_granted_wei`, `amount_wei`) and both ledger legs moved with them. See
+**Season rewards** below.
+
 - **Title: Emberkin** (subtitle *Resonance* kept — it names the signature system).
 - **Kin, Wardens, Resonance, Temperament, Sync** are kept verbatim — the bond system is the product.
 - **No gameplay value on-chain, no Kin-as-NFT, no pay-to-win.** The only content string changed is
@@ -78,7 +84,7 @@ If the RNG ever drifts, the corpus fails the build.
 - **identity** — token verification (JWKS), and the **service-token exchange** that authenticates
   the three calls below.
 - **billing** — reads what an account owns, to gate a cosmetic equip (`billing:read`).
-- **ledger** — posts a season reward (`ledger:post`); the service keeps no balance.
+- **ledger** — posts a season reward in **EMBER** (`ledger:post`); the service keeps no balance.
 - **worlds** — posts achievements to the shared profile (`worlds:write`).
 
 ### How the outbound calls authenticate
@@ -159,6 +165,44 @@ schema version and refuses to serve below it. Copy `.env.example` to `.env` for 
 - `PUT /v1/saves/me/cosmetics` — equip a cosmetic, gated by a billing entitlement, never a stat
 - `GET /v1/saves/me/achievements` · `GET /v1/content/dex`
 
+## Season rewards
+
+A season reward is a **ledger posting**, not a column: a game exploit that mints rewards is a money
+incident reconciled against the ledger, rather than a number that appeared in a save row. Two legs,
+balanced by construction — `engagement:emberkin` / `treasury` / `equity` on the debit side, the
+player's `available` / `liability` on the credit side.
+
+**Both legs are EMBER, and both were SHARD until micro-org#226.** The programme is funded in EMBER
+(`docs/ecosystem/21` §3), so paying it out in Shards meant a grant that could not be reconstructed
+against its own funding. The danger was not that this would fail loudly — it was that it would
+*succeed*: the ledger's retired-asset guard covers acquisition kinds only (`purchase`,
+`subscription_charge`, `deposit_credited`), and `reward_granted` is not one of them. A SHARD reward
+would have posted a `201`, raised a user liability with no custody behind it, and frozen SHARD
+withdrawals on a drift that only issuing more SHARD could clear — which `assertIssuable` refuses by
+name. Nothing had run through it yet (0 engagement accounts, 0 `reward_granted` entries on mainnet,
+2026-08-10), which is the only reason this was a change rather than an incident.
+
+The asset is spelled once, as `ENGAGEMENT_ASSET` in `src/ledgerclient.ts`, and typed
+`IssuableAssetCode` — `Exclude<AssetCode, 'SHARD'>` from `contracts-chain`. Routing a reward back
+through a retired asset does not compile.
+
+### The rate, and why it is frozen
+
+Migration 9 renamed `reward_budget_shards` → `reward_budget_wei`, `rewards_granted_shards` →
+`rewards_granted_wei` and `amount_shards` → `amount_wei`, converting each by **40000000000000000**.
+That is a real conversion and not a relabelling — SHARD has 0 decimals and EMBER has 18 — built from
+two recorded facts: one Shard is one US cent (`SHARDS_PER_USD = 100n`), and one EMBER is 0.25 USD
+(`pricing.administered_prices`, `usd_scaled` 250000). So 1 Shard = 0.04 EMBER = 4e16 wei.
+
+The literal is frozen into the migration, and `micro-admin-api`'s migration 13 and `micro-worlds`'
+migration 11 freeze the identical constant. A migration runs **once** and is checksummed
+afterwards; an administered price is one operator-editable row. A stored figure that re-read the
+price would restate itself every time somebody edited that number.
+
+`EMBERKIN_SEASON_REWARD_BUDGET_SHARDS` is **refused at boot**, not accepted-and-ignored — see
+`.env.example`. Accepting it would silently fall back to the default: a budget nobody chose,
+presented as one somebody did.
+
 ## Right to erasure
 
 Rule 6 of `docs/ecosystem/03` §2: a service storing a `user_id` subscribes to
@@ -166,7 +210,7 @@ Rule 6 of `docs/ecosystem/03` §2: a service storing a `user_id` subscribes to
 achievements are deleted, and queued jobs and emitted outbox rows naming the user go with them.
 
 **One row survives, anonymised: `reward_grants`.** It is the local record of a ledger posting that
-moved real money, and `seasons.rewards_granted_shards` is the total it has to keep reconciling
+moved real money, and `seasons.rewards_granted_wei` is the total it has to keep reconciling
 against — deleting it would leave the season reporting spend with nothing to account for. Its
 `user_id` becomes a random uuid, its `idempotency_key` is overwritten (the derived key embedded the
 raw uuid in plain text) and `user_erased_at` marks it, with a database trigger making the erasure

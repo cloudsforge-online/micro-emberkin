@@ -39,7 +39,7 @@ logger.info('starting', {
   version: env.version,
   schemaVersion: SCHEMA_VERSION,
   species: data.dex.length,
-  seasonRewardBudgetShards: env.seasonRewardBudgetShards.toString(),
+  seasonRewardBudgetWei: env.seasonRewardBudgetWei.toString(),
 });
 
 // 4. The database pool.
@@ -190,7 +190,7 @@ registerHandlers(runner, {
   ledger,
   producer: SERVICE,
   signingSecret: env.outboxSigningSecret,
-  seasonBudgetShards: env.seasonRewardBudgetShards,
+  seasonBudgetWei: env.seasonRewardBudgetWei,
   queue,
 });
 await seedRecurring(queue);
