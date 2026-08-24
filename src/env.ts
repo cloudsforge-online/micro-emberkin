@@ -272,6 +272,17 @@ export interface Env {
   readonly logLevel: 'debug' | 'info' | 'warn' | 'error';
   /** Rule 1: one database, named by this service's own variable. */
   readonly databaseUrl: string;
+  /**
+   * The testnet database, when this pod serves both estates. EMPTY is the single-network case, and
+   * then `networkSql` REFUSES a testnet request rather than answering it out of mainnet rows.
+   * See micro-deploy `docs/network-consolidation.md`.
+   */
+  readonly databaseUrlTestnet: string;
+  /**
+   * `CF_NETWORK_SINGLE`: the network to assume when no `CF-Network` header arrives. For `pnpm dev`,
+   * which has no gateway in front of it. Never set in production.
+   */
+  readonly singleNetwork: string;
   readonly databasePoolMax: number;
   readonly identityJwksUrl: string;
   readonly identityIssuer: string;
@@ -436,6 +447,8 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     version: optional(source, 'CLOUDSFORGE_TAG', 'dev'),
     logLevel: logLevel as Env['logLevel'],
     databaseUrl: required(source, 'EMBERKIN_DATABASE_URL'),
+    databaseUrlTestnet: optional(source, 'EMBERKIN_DATABASE_URL_TESTNET', ''),
+    singleNetwork: optional(source, 'CF_NETWORK_SINGLE', ''),
     databasePoolMax: integer(source, 'EMBERKIN_DATABASE_POOL_MAX', 10, 1, 100),
     identityJwksUrl: required(source, 'IDENTITY_JWKS_URL'),
     identityIssuer: required(source, 'IDENTITY_ISSUER'),

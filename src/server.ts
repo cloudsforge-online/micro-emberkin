@@ -28,7 +28,9 @@
 
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ForbiddenError, TokenError, bearerFrom, requireScope, statusFor, type Principal } from '@cloudsforge/auth';
-import type { Lifecycle } from '@cloudsforge/lifecycle';
+import type { Lifecycle } from '@cloudsforge/lifecycle'
+import { NetworkUnknownError, requestNetwork, type Network } from '@cloudsforge/http'
+import type { NetworkSql } from '@cloudsforge/db';
 import { Metrics, newRequestId, type Logger } from '@cloudsforge/telemetry';
 import type { JobQueue } from '@cloudsforge/jobs';
 import {
@@ -70,11 +72,26 @@ export interface ServerDeps {
   readonly logger: Logger;
   readonly metrics: Metrics;
   readonly verifier: PrincipalVerifier;
-  readonly sql: Db;
+  /**
+   * The per-network SELECTOR, not a handle. `NetworkSql` has no query methods, so a route that
+   * reaches past `ctx.sql` for the process-wide pool does not compile. That is the point: a wrong
+   * handle is not an error, it is a query that SUCCEEDS against the other estate's rows.
+   */
+  readonly sql: NetworkSql;
+  /** `CF_NETWORK_SINGLE`, for `pnpm dev`, which has no gateway to stamp the header. */
+  readonly singleNetwork?: Network;
   readonly producer: string;
   readonly data: GameData;
   readonly billing: EntitlementReader;
+  /**
+   * The boot-time queue. `forRequest` replaces it with the one for this request's network before
+   * any route sees it — a testnet request that enqueued into the mainnet queue would be picked up
+   * by a handler reading mainnet rows, which is a cross-network write with a job row to prove it
+   * was deliberate.
+   */
   readonly queue: Pick<JobQueue, 'enqueue'>;
+  /** The per-network queues, selected once per request. */
+  readonly queueFor: (network: Network) => Pick<JobQueue, 'enqueue'>;
   /**
    * Every key an inbound delivery may have been signed with, newest first — `OUTBOX_ACCEPT_SECRETS`,
    * defaulting to `[OUTBOX_SIGNING_SECRET]`. A LIST rather than a value because the estate's outbox
@@ -154,12 +171,33 @@ interface Reply {
   readonly headers?: Record<string, string>;
 }
 
+/**
+ * Routes that answer without belonging to a network.
+ *
+ * Kubelet probes the first two and Prometheus scrapes the third; none arrives through the gateway,
+ * so none carries `CF-Network`. Refusing them turns a data-isolation rule into a CrashLoopBackOff —
+ * which is exactly what agora's first build did. A literal set rather than a prefix, because this
+ * is an exemption from a data boundary and widening it should be a deliberate edit.
+ */
+const OPERATIONAL_ROUTES: ReadonlySet<string> = new Set(['/livez', '/readyz', '/metrics']);
+
 interface RequestContext {
   readonly req: IncomingMessage;
   readonly url: URL;
   readonly requestId: string;
   readonly log: Logger;
   readonly params: Readonly<Record<string, string>>;
+  /**
+   * The network THIS REQUEST belongs to, from the `CF-Network` header the gateway stamped. Not a
+   * property of the process: one pod serves both estates since the network consolidation, so
+   * "which network am I" has no answer.
+   */
+  readonly network: Network;
+  /**
+   * The handle for `network`, resolved once at the edge. Routes use this rather than reaching for
+   * `deps.sql`, which is a `NetworkSql` with no query methods — so the mistake does not compile.
+   */
+  readonly sql: Db;
 }
 
 interface Route {
@@ -222,25 +260,74 @@ export function createServer(deps: ServerDeps): Server {
     inFlight += 1;
     deps.metrics.set('http_requests_in_flight', inFlight);
 
-    const finish = (status: number): void => {
+    const finish = (status: number, metricNetwork: string): void => {
       inFlight -= 1;
       deps.metrics.set('http_requests_in_flight', inFlight);
       const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-      deps.metrics.increment('http_requests_total', { method, route: routeLabel, status: String(status) });
-      deps.metrics.observe('http_request_duration_ms', durationMs, { method, route: routeLabel });
+      deps.metrics.increment('http_requests_total', {
+        method,
+        route: routeLabel,
+        status: String(status),
+        // One target now serves both estates, so the network has to be on the SERIES. Labelled
+        // per target it would say nothing — micro-org#398 in a form nothing could recover.
+        network: metricNetwork,
+      });
+      deps.metrics.observe('http_request_duration_ms', durationMs, {
+        method,
+        route: routeLabel,
+        network: metricNetwork,
+      });
     };
 
-    void handle(matched, { req, url, requestId, log, params }, deps)
+    // ── THE NETWORK, THEN THE HANDLE, BEFORE ANY ROUTE RUNS ──────────────────────────────────
+    //
+    // `requestNetwork` REFUSES an unstamped request rather than assuming mainnet: a 500 is a
+    // routing fault made loud, where a default is a cross-network write nothing would ever flag.
+    //
+    // The operational endpoints are exempt because kubelet and Prometheus do not come through the
+    // gateway and never send the header. Refusing them makes the pod never become ready.
+    const networkless = matched !== undefined && OPERATIONAL_ROUTES.has(matched.path)
+    let network: Network
+    try {
+      network = networkless
+        ? (deps.singleNetwork ?? deps.sql.networks[0] ?? 'mainnet')
+        : requestNetwork(req.headers, deps.singleNetwork ? { fallback: deps.singleNetwork } : {})
+    } catch (err) {
+      log.error('request carries no usable network', {
+        err: err instanceof NetworkUnknownError ? err.message : err,
+      })
+      send(
+        res,
+        errorReply(500, 'network_unknown', 'this request could not be attributed to a network', requestId),
+        requestId,
+      )
+      finish(500, 'unknown')
+      return
+    }
+
+    const sql = deps.sql.for(network) as unknown as Db
+    void handle(matched, { req, url, requestId, log, params, network, sql }, forRequest(deps, network))
       .then((reply) => {
         send(res, reply, requestId);
-        finish(reply.status);
+        finish(reply.status, network);
       })
       .catch((err: unknown) => {
         log.error('request handler threw after mapping', { err });
         send(res, errorReply(500, 'internal', 'the request could not be completed', requestId), requestId);
-        finish(500);
+        finish(500, network);
       });
   });
+}
+
+/**
+ * The deps a REQUEST sees.
+ *
+ * Everything that carries a database handle is rebuilt against this request's network. `sql` stays
+ * the selector on `deps` (routes read `ctx.sql`), so the only thing to swap is the queue — but that
+ * one matters: an enqueue is a write, and a write into the other estate's queue is invisible.
+ */
+function forRequest(deps: ServerDeps, network: Network): ServerDeps {
+  return { ...deps, queue: deps.queueFor(network) };
 }
 
 async function handle(route: Route | undefined, ctx: RequestContext, deps: ServerDeps): Promise<Reply> {
@@ -370,7 +457,7 @@ function buildRoutes(): Route[] {
             // performed. That silence is the defect this handler exists to fix.
             throw new BadRequestError('identity.user.deleted requires a uuid userId');
           }
-          const erasure = await withInbox(deps.sql, topic, eventId, (tx) => eraseUser(tx, erasedUserId));
+          const erasure = await withInbox(ctx.sql, topic, eventId, (tx) => eraseUser(tx, erasedUserId));
           if (erasure.status === 'duplicate') return { status: 202, body: { status: 'duplicate' } };
           if (erasure.value.battlesNotCascaded > 0) {
             ctx.log.error('battles did not cascade from saves — the foreign key has changed', {
@@ -390,7 +477,7 @@ function buildRoutes(): Route[] {
 
         // Deduped on the source event id. A failed handler leaves no inbox row, so a redelivery is
         // reprocessed rather than swallowed.
-        const outcome = await withInbox(deps.sql, topic, eventId, async () => {
+        const outcome = await withInbox(ctx.sql, topic, eventId, async () => {
           return { qualifies: SEASON_PASS_SKUS.has(sku) && userId.length > 0 };
         });
         if (outcome.status === 'duplicate') return { status: 202, body: { status: 'duplicate' } };
@@ -418,7 +505,7 @@ function buildRoutes(): Route[] {
       const starter = requireString(body, 'starter');
       const seed = readOptionalSeed(body['seed']);
       const { save, created } = await startGame(
-        deps.sql,
+        ctx.sql,
         deps.producer,
         deps.data,
         { userId, wardenName, starter, ...(seed !== null ? { seed } : {}), correlationId: ctx.requestId },
@@ -429,7 +516,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/saves/me', async (ctx, deps) => {
       const userId = await requireUser(ctx, deps);
-      const save = await findSave(deps.sql, userId);
+      const save = await findSave(ctx.sql, userId);
       if (!save) return errorReply(404, 'not_found', 'no save for this account', ctx.requestId);
       return { status: 200, body: serializeSave(save) };
     }),
@@ -447,7 +534,7 @@ function buildRoutes(): Route[] {
       const maxTurns = typeof body['maxTurns'] === 'number' ? body['maxTurns'] : undefined;
 
       const result = await resolveBattle(
-        deps.sql,
+        ctx.sql,
         deps.producer,
         deps.data,
         {
@@ -488,7 +575,7 @@ function buildRoutes(): Route[] {
       const itemUrn = body['itemUrn'] === null ? null : typeof body['itemUrn'] === 'string' ? body['itemUrn'] : undefined;
       if (itemUrn === undefined) throw new BadRequestError('itemUrn must be a string or null');
       const equipped = await equipCosmetic(
-        deps.sql,
+        ctx.sql,
         deps.producer,
         deps.billing,
         deps.data,
@@ -500,7 +587,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/saves/me/achievements', async (ctx, deps) => {
       const userId = await requireUser(ctx, deps);
-      const rows = await deps.sql<{ code: string; name: string; points: number; unlocked_at: Date; delivered_at: Date | null }[]>`
+      const rows = await ctx.sql<{ code: string; name: string; points: number; unlocked_at: Date; delivered_at: Date | null }[]>`
         select code, name, points, unlocked_at, delivered_at from player_achievements
          where user_id = ${userId} order by unlocked_at desc
       `;

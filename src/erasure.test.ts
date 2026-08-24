@@ -5,6 +5,7 @@
 // rather than a list somebody has to remember to update. A future table holding a `user_id` fails
 // this test on the day it is added, which is the point.
 
+import { networkSql, type Sql as RuntimeSql } from '@cloudsforge/db';
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
@@ -62,11 +63,13 @@ before(async () => {
     logger: quietLogger(),
     metrics: testMetrics(),
     verifier,
-    sql: asDb(sql),
+    sql: networkSql({ mainnet: asDb(sql) as unknown as RuntimeSql }),
+    singleNetwork: 'mainnet' as const,
     producer: 'emberkin',
     data,
     billing: fakeBilling(),
     queue: { enqueue: async (o) => void enqueued.push({ kind: o.kind, key: o.key }) },
+    queueFor: () => ({ enqueue: async (o) => void enqueued.push({ kind: o.kind, key: o.key }) }),
     eventAcceptSecrets: [SECRET],
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));

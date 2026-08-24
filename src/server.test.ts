@@ -1,6 +1,7 @@
 // End-to-end HTTP tests through the real server: health, metrics, the signed webhook, starting a
 // game, an idempotent battle submission that REPLAYS (never 409s), and cosmetic entitlement gating.
 
+import { networkSql, type Sql as RuntimeSql } from '@cloudsforge/db';
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
@@ -55,11 +56,13 @@ before(async () => {
     logger: quietLogger(),
     metrics: testMetrics(),
     verifier,
-    sql: asDb(sql),
+    sql: networkSql({ mainnet: asDb(sql) as unknown as RuntimeSql }),
+    singleNetwork: 'mainnet' as const,
     producer: 'emberkin',
     data,
     billing,
     queue: { enqueue: async (o) => void enqueued.push({ kind: o.kind, key: o.key }) },
+    queueFor: () => ({ enqueue: async (o) => void enqueued.push({ kind: o.kind, key: o.key }) }),
     eventAcceptSecrets: [SECRET],
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
