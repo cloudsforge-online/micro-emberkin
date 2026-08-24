@@ -21,6 +21,17 @@ import { onRunnerEvent, registerHandlers, seedRecurring } from './jobs.ts';
 import { buildUpstreams } from './upstreams.ts';
 import type { Db } from './outbox.ts';
 
+// ── WHICH ESTATE THIS DEPLOYMENT IS ─────────────────────────────────────────────────────────
+//
+// Every per-network map in this file keys its primary entry by THIS, never by the literal
+// `mainnet`. Same image, same code, different env: a testnet pod that hardcodes the key holds
+// its own database and its own queue under the other estate's name, and then refuses — or, when
+// the throw escapes a request listener, DIES — on every request the gateway correctly stamped.
+//
+// It happened twice. The handle, then the job plane.
+const ownNetwork = (env.singleNetwork || 'mainnet') as 'mainnet' | 'testnet';
+
+
 // 1. Environment — validated on import of ./env.ts.
 
 // 2. Telemetry, before anything that can fail.
@@ -52,8 +63,8 @@ const poolOptions = { max: env.databasePoolMax, onnotice: () => {} };
 const sql = postgres(env.databaseUrl, poolOptions);
 const sqlTestnet = env.databaseUrlTestnet ? postgres(env.databaseUrlTestnet, poolOptions) : undefined;
 const pools: ReadonlyArray<readonly [Network, typeof sql]> = [
-  ['mainnet', sql],
-  ...(sqlTestnet ? ([['testnet', sqlTestnet]] as const) : []),
+  [ownNetwork, sql],
+  ...(sqlTestnet && ownNetwork !== 'testnet' ? ([['testnet', sqlTestnet]] as const) : []),
 ];
 
 // 5. Assert the schema on EVERY network, not only the first. A testnet database behind on
@@ -157,7 +168,7 @@ const planeFor = (network: Network) => {
   if (!plane) throw new Error(`no plane for network ${network}`);
   return plane;
 };
-const queue = planeFor('mainnet').queue;
+const queue = planeFor(ownNetwork).queue;
 
 // 9. Routes.
 const verifier = new Verifier({ jwksUrl: env.identityJwksUrl, issuer: env.identityIssuer });
