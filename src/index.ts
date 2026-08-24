@@ -8,7 +8,7 @@
  */
 
 import postgres from 'postgres';
-import { assertSchemaAtLeast, type Sql as DbSql } from '@cloudsforge/db';
+import { assertSchemaAtLeast, networkSql, type Network, type Sql as DbSql } from '@cloudsforge/db';
 import { JobQueue, JobRunner, type Sql as JobsSql } from '@cloudsforge/jobs';
 import { Verifier } from '@cloudsforge/auth';
 import { Lifecycle, httpProbe, installSignalHandlers, postgresProbe } from '@cloudsforge/lifecycle';
@@ -42,16 +42,30 @@ logger.info('starting', {
   seasonRewardBudgetWei: env.seasonRewardBudgetWei.toString(),
 });
 
-// 4. The database pool.
-const sql = postgres(env.databaseUrl, { max: env.databasePoolMax, onnotice: () => {} });
+// 4. One pool per network this deployment serves.
+//
+// `EMBERKIN_DATABASE_URL_TESTNET` unset is the single-network case, and then `networkSql` holds one
+// handle and REFUSES a testnet request rather than answering it out of mainnet rows. That refusal
+// is the safety property: a substituted handle is a query that SUCCEEDS against the other estate's
+// save games and says nothing. See micro-deploy `docs/network-consolidation.md`.
+const poolOptions = { max: env.databasePoolMax, onnotice: () => {} };
+const sql = postgres(env.databaseUrl, poolOptions);
+const sqlTestnet = env.databaseUrlTestnet ? postgres(env.databaseUrlTestnet, poolOptions) : undefined;
+const pools: ReadonlyArray<readonly [Network, typeof sql]> = [
+  ['mainnet', sql],
+  ...(sqlTestnet ? ([['testnet', sqlTestnet]] as const) : []),
+];
 
-// 5. Assert the schema. This does NOT migrate.
-try {
-  await assertSchemaAtLeast(sql as unknown as DbSql, SCHEMA_VERSION);
-} catch (err) {
-  logger.fatal('schema assertion failed', { err, required: SCHEMA_VERSION });
-  await sql.end({ timeout: 5 }).catch(() => {});
-  process.exit(1);
+// 5. Assert the schema on EVERY network, not only the first. A testnet database behind on
+//    migrations would otherwise be discovered by the first testnet request rather than at boot.
+for (const [network, handle] of pools) {
+  try {
+    await assertSchemaAtLeast(handle as unknown as DbSql, SCHEMA_VERSION);
+  } catch (err) {
+    logger.fatal('schema assertion failed', { err, required: SCHEMA_VERSION, network });
+    await Promise.all(pools.map(([, h]) => h.end({ timeout: 5 }).catch(() => {})));
+    process.exit(1);
+  }
 }
 
 // 6. The upstreams. All three take the same scoped service token — never a shared one (SD-05).
@@ -126,9 +140,24 @@ lifecycle
   .addProbe(httpProbe('ledger', `${env.ledgerUrl}/livez`, { kind: 'soft' }))
   .addProbe(httpProbe('worlds', `${env.worldsUrl}/livez`, { kind: 'soft' }));
 
-// 8. Shared bundles.
+// 8. Shared bundles — one set per network.
+//
+// The QUEUE is per-network too, and that is not incidental. A testnet request that enqueued into
+// the mainnet queue would be picked up by a handler reading mainnet rows: a cross-network write
+// that succeeds, with a job row to prove it was deliberate. One queue per database, one runner per
+// queue, and neither can reach the other.
 const db = sql as unknown as Db;
-const queue = new JobQueue(sql as unknown as JobsSql, { owner: env.instanceId, leaseMs: 120_000 });
+const planes = pools.map(([network, handle]) => ({
+  network,
+  db: handle as unknown as Db,
+  queue: new JobQueue(handle as unknown as JobsSql, { owner: env.instanceId, leaseMs: 120_000 }),
+}));
+const planeFor = (network: Network) => {
+  const plane = planes.find((p) => p.network === network);
+  if (!plane) throw new Error(`no plane for network ${network}`);
+  return plane;
+};
+const queue = planeFor('mainnet').queue;
 
 // 9. Routes.
 const verifier = new Verifier({ jwksUrl: env.identityJwksUrl, issuer: env.identityIssuer });
@@ -137,17 +166,25 @@ const server = createServer({
   logger,
   metrics,
   verifier,
-  sql: db,
+  sql: networkSql(Object.fromEntries(pools.map(([n, h]) => [n, h as unknown as DbSql]))),
+  ...(env.singleNetwork ? { singleNetwork: env.singleNetwork as Network } : {}),
   producer: SERVICE,
   data,
   billing,
+  // The boot-time value. `forRequest` in server.ts replaces it with the queue for the request's
+  // network before any route sees it.
   queue,
+  queueFor: (network: Network) => planeFor(network).queue,
   // Absent `OUTBOX_ACCEPT_SECRETS` this is `[env.outboxSigningSecret]`, i.e. unchanged.
   eventAcceptSecrets: env.acceptSecrets,
   beforeScrape: async () => {
-    const stats = await queue.stats();
-    metrics.set('jobs_pending', stats.pending);
-    metrics.set('jobs_overdue', stats.overdue);
+    // Per network, because the two queues are separate and a summed gauge would hide a testnet
+    // backlog behind a healthy mainnet one.
+    for (const plane of planes) {
+      const stats = await plane.queue.stats();
+      metrics.set('jobs_pending', stats.pending, { network: plane.network });
+      metrics.set('jobs_overdue', stats.overdue, { network: plane.network });
+    }
     // Read from what this process already holds; `snapshot()` dials nobody. A `static` deployment
     // reports usable, because the token it was handed genuinely is a bearer it can present — for
     // ten minutes. `emberkin_service_token_static` is the gauge that says it cannot be renewed.
@@ -165,36 +202,48 @@ const server = createServer({
   },
 });
 
-// 10. The job runner, started before listen().
-const runner = new JobRunner({
-  queue,
-  concurrency: 4,
-  pollMs: 1_000,
-  shouldClaim: () => lifecycle.claimingJobs,
-  onEvent: (event) => {
-    if (event.kind) {
-      if (event.type === 'claimed') metrics.increment('jobs_claimed_total', { kind: event.kind });
-      if (event.type === 'completed') metrics.increment('jobs_completed_total', { kind: event.kind });
-      if (event.type === 'failed') metrics.increment('jobs_failed_total', { kind: event.kind });
-      if (event.type === 'dead') metrics.increment('jobs_dead_total', { kind: event.kind });
-      if (event.durationMs !== undefined) metrics.observe('jobs_duration_ms', event.durationMs, { kind: event.kind });
-    }
-    onRunnerEvent(queue, logger)(event);
-  },
+// 10. The job runners — ONE PER NETWORK, started before listen().
+//
+// Bulkheaded on purpose. A single runner over a single queue would drain mainnet and leave testnet
+// jobs to accumulate for ever, and there would be no metric to say so: `jobs_pending` without a
+// network label is a sum in which one healthy half hides the other. Each runner claims only from
+// its own queue and every handler is registered against its own network's handle, so a handler
+// physically cannot reach the other estate's rows.
+const runners = planes.map((plane) => {
+  const runner = new JobRunner({
+    queue: plane.queue,
+    concurrency: 4,
+    pollMs: 1_000,
+    shouldClaim: () => lifecycle.claimingJobs,
+    onEvent: (event) => {
+      if (event.kind) {
+        const labels = { kind: event.kind, network: plane.network };
+        if (event.type === 'claimed') metrics.increment('jobs_claimed_total', labels);
+        if (event.type === 'completed') metrics.increment('jobs_completed_total', labels);
+        if (event.type === 'failed') metrics.increment('jobs_failed_total', labels);
+        if (event.type === 'dead') metrics.increment('jobs_dead_total', labels);
+        if (event.durationMs !== undefined) metrics.observe('jobs_duration_ms', event.durationMs, labels);
+      }
+      onRunnerEvent(plane.queue, logger)(event);
+    },
+  });
+  registerHandlers(runner, {
+    sql: plane.db,
+    logger,
+    metrics,
+    worlds,
+    ledger,
+    producer: SERVICE,
+    signingSecret: env.outboxSigningSecret,
+    seasonBudgetWei: env.seasonRewardBudgetWei,
+    queue: plane.queue,
+  });
+  return runner;
 });
-registerHandlers(runner, {
-  sql: db,
-  logger,
-  metrics,
-  worlds,
-  ledger,
-  producer: SERVICE,
-  signingSecret: env.outboxSigningSecret,
-  seasonBudgetWei: env.seasonRewardBudgetWei,
-  queue,
-});
-await seedRecurring(queue);
-runner.start();
+// Recurring work is seeded into every queue: a testnet estate with no achievement sweep is a
+// half-running game, not a dormant one.
+for (const plane of planes) await seedRecurring(plane.queue);
+for (const runner of runners) runner.start();
 
 // 11. Listen.
 await new Promise<void>((resolve, reject) => {
@@ -207,12 +256,12 @@ logger.info('listening', { port: env.port });
 lifecycle.markReady();
 
 lifecycle.onShutdown(async () => {
-  await sql.end({ timeout: 5 });
-  logger.info('database pool closed');
+  await Promise.all(pools.map(([, handle]) => handle.end({ timeout: 5 })));
+  logger.info('database pools closed', { networks: pools.length });
 });
 lifecycle.onShutdown(async () => {
-  const clean = await runner.stop(20_000);
-  logger.info('job runner stopped', { clean });
+  const clean = (await Promise.all(runners.map((r) => r.stop(20_000)))).every(Boolean);
+  logger.info('job runners stopped', { clean, runners: runners.length });
 });
 lifecycle.onShutdown(
   () =>
