@@ -71,26 +71,48 @@ describe('a single-network pod cannot end up holding two testnet entries', () =>
 })
 
 describe('the throw reaches a response, not the process', () => {
-  const SERVER = readFileSync(new URL('./server.ts', import.meta.url), 'utf8')
-
   /*
-   * `forRequest` rebuilds this request's domain objects, and in the services that bulkhead their job
-   * queues it reaches a plane that throws exactly as hard as the handle does. That is right.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * **THIS BLOCK READS `kernel.ts` AND `routes.ts` NOW, AND `forRequest` NO LONGER EXISTS.**
    *
-   * What matters is WHERE it is called. On the `void handle(…)` line it is evaluated synchronously,
-   * before `handle` returns anything to attach a `.catch` to — so the throw leaves the request
-   * listener uncaught, and node exits on an uncaught exception in a listener. Not a 500, not even
-   * the hang the earlier fix removed: the pod dies, and its replacement dies on the next request.
+   * The defect it was written for: `forRequest(deps, network)` reached this request's per-network
+   * job plane, and `planeFor` throws for a network this deployment does not hold. Called on the
+   * `void handle(…)` line it was evaluated SYNCHRONOUSLY, before `handle` returned anything to
+   * attach a `.catch` to — so the throw left the request listener uncaught, and node exits on an
+   * uncaught exception in a listener. Not a 500, not even a hang: the pod died, and its replacement
+   * died on the next request. A remote crash reachable by anyone who can set a header, against
+   * pods behind a public gateway.
    *
-   * Which made it a remote crash reachable by anyone who can set a header, including against
-   * mainnet pods, which sit behind a public gateway.
+   * Wave M3 removed the function rather than the hazard's cause. Two modules in one process cannot
+   * share one dependency bag (see `routes.ts`), so every handler closes over its own and the queue
+   * is now selected at the point of use — `deps.queueFor(ctx.network)`, INSIDE an async handler,
+   * where a throw is already a rejected promise the kernel's `.catch` is attached to. That is
+   * strictly stronger than resolving it early inside a try, so the guard is repointed rather than
+   * dropped: same two cases, asserting the property instead of one file's spelling of it.
+   *
+   * Both cases are written so they cannot pass by finding nothing — each asserts something is
+   * PRESENT before asserting the dangerous shape is absent.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
    */
-  it('resolves forRequest inside the try, not on the dispatch line', () => {
-    assert.match(SERVER, /try \{[\s\S]{0,600}?scoped = forRequest\(/)
-    assert.doesNotMatch(SERVER, /void handle\([^\n]*forRequest\(/)
+  const KERNEL = readFileSync(new URL('./kernel.ts', import.meta.url), 'utf8')
+  const ROUTES = readFileSync(new URL('./routes.ts', import.meta.url), 'utf8')
+
+  it('resolves nothing per-network on the dispatch line — the handle inside a try, the queue inside a handler', () => {
+    // The one thing the kernel MUST resolve before dispatch is the handle, because `ctx.sql` is a
+    // field of the context. It is inside a try, and the dispatch line carries no call at all.
+    assert.match(KERNEL, /try \{[\s\S]{0,400}?sql = selector\.for\(network\)/)
+    assert.match(KERNEL, /void answer\(matched, \{ req, url, requestId, log, params, network, sql \}\)/)
+    assert.doesNotMatch(KERNEL, /void answer\([^\n]*\.for\(/)
+
+    // And the QUEUE — the plane that used to be resolved eagerly — is reached from `ctx.network`
+    // inside handlers, never hoisted into a bag the listener builds. Asserted PRESENT first, so a
+    // rename cannot make this case pass by matching nothing.
+    const perRequest = [...ROUTES.matchAll(/deps\.queueFor\(ctx\.network\)/g)]
+    assert.ok(perRequest.length > 0, 'the per-network queue must still be selected per request')
+    assert.doesNotMatch(ROUTES, /\bforRequest\(/, 'the eager rebuild is what killed the pod; it must not come back')
   })
 
   it('answers 500 network_unavailable rather than hanging or dying', () => {
-    assert.match(SERVER, /'network_unavailable'/)
+    assert.match(KERNEL, /'network_unavailable'/)
   })
 })

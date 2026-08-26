@@ -144,14 +144,60 @@ pnpm install
 pnpm typecheck
 pnpm verify        # engine demo: play a battle from a seed, no DB needed
 
-# The full suite runs against a real Postgres (deferred constraints, leases, advisory locks):
+# The full suite runs against a real Postgres (deferred constraints, leases, advisory locks) —
+# and against TWO DATABASES, because this deployable is two titles. `src/merged.test.ts` needs
+# both at once; each title's own suite needs only its own.
 docker run -d --rm --name emberkin-pg -e POSTGRES_USER=emberkin -e POSTGRES_PASSWORD=emberkin \
   -e POSTGRES_DB=emberkin_test -p 55440:5432 postgres:17-alpine
-EMBERKIN_TEST_DATABASE_URL=postgres://emberkin:emberkin@127.0.0.1:55440/emberkin_test pnpm test
+PGPASSWORD=emberkin psql -h 127.0.0.1 -p 55440 -U emberkin -d emberkin_test \
+  -c 'create database aetherholm_test'
+EMBERKIN_TEST_DATABASE_URL=postgres://emberkin:emberkin@127.0.0.1:55440/emberkin_test \
+AETHERHOLM_TEST_DATABASE_URL=postgres://emberkin:emberkin@127.0.0.1:55440/aetherholm_test \
+  pnpm test
 ```
 
-Migrations are a separate one-shot (`pnpm migrate`), never run at boot; `index.ts` asserts the
-schema version and refuses to serve below it. Copy `.env.example` to `.env` for local work.
+Migrations are a separate one-shot (`pnpm migrate`), never run at boot; it migrates **both**
+databases in one process and refuses to start if the two DSNs address the same one. `index.ts`
+asserts the schema version and refuses to serve below it. Copy `.env.example` to `.env` for local
+work.
+
+## One process, two titles (wave M3)
+
+Since wave M3 of micro-deploy `docs/service-merge-plan.md` this deployable also runs
+**Aetherholm** — the sky-island strategy title — as a module under `src/aetherholm/`. One image,
+one listener, one `/livez`, one `/readyz`, one `/metrics`, one migrate entrypoint.
+
+Emberkin absorbs on the **upstream** argument rather than on size (aetherholm is the larger at 7.6k
+vs 6.9k LOC): this service already integrates ledger, billing, worlds and identity and holds a
+service credential, while aetherholm calls nothing at all. Folding the zero-upstream side into the
+four-upstream side does not widen the four-upstream side's reach; the reverse would have handed a
+title with no outbound calls a credential that can post to the ledger.
+
+**The two databases are kept and never merged**, under their existing `EMBERKIN_DATABASE_URL` and
+`AETHERHOLM_DATABASE_URL`. That is not caution — the two schemas own **six tables of the same
+name** (`outbox`, `event_subscriptions`, `outbox_deliveries`, `inbox`, `seasons`, `battles`), so a
+handler on the wrong handle does not fail: `select … from seasons` succeeds and returns another
+game's rows. Four things keep them apart, each of which fails on its own:
+
+| | |
+| --- | --- |
+| `RouteSpec.sql` (`src/kernel.ts`) | a route names the SELECTOR its `ctx.sql` comes from; the kernel resolves it at the edge of the request, beside the network |
+| closures, not a `deps` parameter | each module's handlers close over their own bag, so no route can reach the other's queue or producer |
+| `aetherholm/env.ts` | imported by `aetherholm/module.ts` and nothing else, so the composition root never holds that module's DSN |
+| `assertDistinct` (`src/migratortargets.ts`) | the migrator refuses two modules pointed at one database before it issues a statement |
+
+**One webhook, fanned out.** Both titles subscribe to `identity.user.deleted`. `POST /v1/events`
+verifies the MAC once — both read the same estate-wide `OUTBOX_SIGNING_SECRET` — and then delivers
+to every module that subscribes, each against its own database and its own `inbox`. Routing it to
+one module would answer 202 to a deletion half of which never happened, and nothing would retry
+because nothing failed.
+
+**Job metrics carry a `module` label.** Both titles register a job kind called `outbox.relay`,
+exactly; `jobs_pending` and `jobs_overdue` carry no kind at all. Without the label one module's
+sample erases the other's every scrape, and a wedged queue reads as *absent* rather than high.
+
+`src/merged.test.ts` drives the whole of it over a real socket against both databases; each title's
+own suite still drives its own listener alone and passes unchanged.
 
 ## HTTP surface
 
@@ -164,6 +210,12 @@ schema version and refuses to serve below it. Copy `.env.example` to `.env` for 
 - `POST /v1/saves/me/battles` — resolve a battle server-side; idempotent on `Idempotency-Key`
 - `PUT /v1/saves/me/cosmetics` — equip a cosmetic, gated by a billing entitlement, never a stat
 - `GET /v1/saves/me/achievements` · `GET /v1/content/dex`
+
+Aetherholm's surface is served on the same listener and documented in its own repository: the title
+contract (`GET /v1/title`, `POST /v1/provision`) plus city, fleet, alliance and chronicle play under
+`/v1/`. The two path sets are disjoint apart from the three operational routes and the shared
+webhook, and `src/mergedroutes.test.ts` fails if a fifth collision ever appears — a colliding path
+is not an error, it is a route that silently stops being reachable.
 
 ## Season rewards
 
@@ -217,6 +269,13 @@ raw uuid in plain text) and `user_erased_at` marks it, with a database trigger m
 one-way: an anonymised grant can never be re-attributed to a person. The per-table reasoning and
 the lawful basis for each decision are in the header of `src/erasure.ts`, in the code, so they
 cannot drift from the behaviour.
+
+**The event reaches BOTH titles.** Aetherholm subscribes to the same topic and erases its own nine
+`user_id` columns in its own database, on the same delivery — the single `POST /v1/events` fans out
+rather than choosing. This is the one place a merged webhook could have been quietly wrong: routing
+the deletion to one module answers 202, the producer marks it delivered, and every city that person
+founded is still standing with nothing anywhere saying so. `src/merged.test.ts` plants a row in each
+database and asserts **the rows**, not the 202.
 
 ---
 
