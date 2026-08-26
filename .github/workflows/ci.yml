@@ -37,7 +37,24 @@ jobs:
     uses: cloudsforge-online/micro-org/.github/workflows/service-ci.yml@main
     with:
       service: emberkin
-      database-env-var: EMBERKIN_DATABASE_URL
+      # ── TWO DATABASES, DECLARED, BECAUSE THIS DEPLOYABLE IS TWO TITLES ──────────────────────
+      #
+      # Wave M3 of micro-deploy `docs/service-merge-plan.md`: emberkin absorbed aetherholm. The
+      # schemas are NOT merged — they own six tables of the same name — so the reusable workflow
+      # creates `ci_emberkin_test` and `ci_aetherholm_test` and exports the `_TEST_` pair for each.
+      # Pointing both at one database would let one suite's TRUNCATE empty the other's rows
+      # mid-test, which reads as a flake rather than as a configuration mistake.
+      #
+      # AND THE SKIP SCAN IS WHY THE SECOND NAME MUST BE HERE RATHER THAN LEFT IMPLICIT. A name in
+      # this list is treated as OWN: if its suite skips, the build FAILS. A name absent from it
+      # skipping would be filed as "a cross-service tier stood down" and go green — which is
+      # exactly the false green that block exists to end, and it would hide 163 aetherholm
+      # database-backed tests not running.
+      #
+      # `_TESTNET` names are deliberately NOT here: the workflow's suffix check demands
+      # `%_DATABASE_URL` and would fail the build on `EMBERKIN_DATABASE_URL_TESTNET`. Nothing is
+      # lost — no suite reads a testnet DSN.
+      database-env-var: EMBERKIN_DATABASE_URL AETHERHOLM_DATABASE_URL
       port: 4100
       # The image startup smoke test boots the real service, and `env.ts` validates its
       # configuration at import — so the container needs the variables it declares, not just a
@@ -92,7 +109,18 @@ jobs:
       packages: read
 
   migrate:
-    name: The migrator, on an empty database
+    # ── BESPOKE, AND IT HAS TO STAY BESPOKE ────────────────────────────────────────────────────
+    #
+    # The reusable workflow's `migrate-command` is a single command line and its image job runs it
+    # once. That is still true and still fine for the IMAGE smoke test — `pnpm migrate` migrates
+    # every database this deployable owns in one process, sequentially, because `src/migrator.ts`
+    # builds one target list from both modules. What this job adds is what the reusable one cannot:
+    # the migrator run AS a deploy runs it, on EMPTY databases, and run TWICE to prove it is
+    # idempotent — because a deploy re-runs the one-shot Job on every release.
+    #
+    # Wave M3 made it two databases. `AETHERHOLM_DATABASE_URL` is created below rather than by the
+    # service container, which can only make one.
+    name: The migrator, on two empty databases
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -110,6 +138,12 @@ jobs:
           --health-retries 10
     env:
       EMBERKIN_DATABASE_URL: postgres://emberkin:emberkin@127.0.0.1:5432/emberkin_test
+      # THE SECOND DATABASE. Distinct from the first, and `src/migratortargets.ts` refuses to issue
+      # a statement if it ever stops being: the two schemas own `outbox`, `event_subscriptions`,
+      # `outbox_deliveries`, `inbox`, `seasons` and `battles`, so one shared database is two
+      # `create table seasons` racing and then one module's tables never created — with a migrator
+      # that exits 0. Created in the step below; the service container makes only `POSTGRES_DB`.
+      AETHERHOLM_DATABASE_URL: postgres://emberkin:emberkin@127.0.0.1:5432/aetherholm_test
       IDENTITY_JWKS_URL: http://127.0.0.1:4001/.well-known/jwks.json
       IDENTITY_ISSUER: http://127.0.0.1:4001
       LEDGER_URL: http://127.0.0.1:4007
@@ -174,7 +208,15 @@ jobs:
       - name: Install
         working-directory: emberkin
         run: pnpm install --frozen-lockfile
-      - name: Migrate the test database
+      - name: The absorbed module's database
+        # The Postgres service creates one database. The second is made here, deliberately as a
+        # separate database on the same server rather than a schema in the first — see the note on
+        # AETHERHOLM_DATABASE_URL above.
+        run: |
+          set -euo pipefail
+          PGPASSWORD=emberkin psql -h 127.0.0.1 -U emberkin -d emberkin_test -v ON_ERROR_STOP=1 \
+            -c 'create database aetherholm_test'
+      - name: Migrate both test databases
         working-directory: emberkin
         run: pnpm migrate
       - name: Migrating twice is a no-op
@@ -182,6 +224,31 @@ jobs:
         # A deploy re-runs the one-shot job on every release; a migrator that is not idempotent turns
         # the second deploy of an unchanged schema into an outage.
         run: pnpm migrate
+      - name: Both schemas are actually there, and in their OWN database
+        # The failure this whole arrangement exists to prevent is a migrator that exits 0 having
+        # created nothing. So the tables are counted rather than the exit code trusted, and each
+        # database is checked for a table only the OTHER module owns — which is what a shared
+        # ledger, or a target list pointed twice at one DSN, would produce.
+        run: |
+          set -euo pipefail
+          q() { PGPASSWORD=emberkin psql -h 127.0.0.1 -U emberkin -d "$1" -tAc "$2"; }
+          emberkin_tables=$(q emberkin_test "select count(*) from information_schema.tables where table_schema='public'")
+          aetherholm_tables=$(q aetherholm_test "select count(*) from information_schema.tables where table_schema='public'")
+          echo "emberkin_test: ${emberkin_tables} tables; aetherholm_test: ${aetherholm_tables} tables"
+          [ "$emberkin_tables" -ge 10 ] || { echo '::error::emberkin_test is missing its schema'; exit 1; }
+          [ "$aetherholm_tables" -ge 22 ] || { echo '::error::aetherholm_test is missing its schema — the second migrator did not run'; exit 1; }
+          # `cities` is aetherholm's alone; `saves` is emberkin's alone. Each must be absent from
+          # the other database, or the two ledgers have been confused.
+          [ "$(q emberkin_test "select count(*) from information_schema.tables where table_name='cities'")" = "0" ] \
+            || { echo '::error::aetherholm tables were created in emberkin_test'; exit 1; }
+          [ "$(q aetherholm_test "select count(*) from information_schema.tables where table_name='saves'")" = "0" ] \
+            || { echo '::error::emberkin tables were created in aetherholm_test'; exit 1; }
+          # And each ledger records its OWN module's versions, under its own service name.
+          for db in emberkin_test aetherholm_test; do
+            n=$(q "$db" "select count(*) from schema_migrations")
+            echo "${db}: ${n} migrations recorded"
+            [ "$n" -gt 0 ] || { echo "::error::${db} has an empty migration ledger"; exit 1; }
+          done
 
   rules:
     name: The controls this service exists to add
@@ -212,6 +279,15 @@ jobs:
           echo 'ok: no balance column'
 
       - name: The inbound event webhook still verifies a signature
+        # ── IT READS `src/routes.ts` NOW ────────────────────────────────────────────────────────
+        #
+        # Wave M3 split `src/server.ts` into `kernel.ts` (the request lifecycle) and `routes.ts`
+        # (the handlers), so this webhook moved file without changing a line. A guard left pointing
+        # at the file its subject has left greps a file that still exists and finds nothing — which
+        # is a RED build here rather than a silent pass, because every check below is a `grep -q`
+        # that must succeed. That is the good version of this failure; it is written down because
+        # the equivalent in a source-reading TEST can pass vacuously instead.
+        #
         # This used to grep src/server.ts for 'timingSafeEqual', and that proxy went stale the
         # moment the signature scheme moved to @cloudsforge/contracts-events: the timing-safe
         # comparison now lives in the contract's verifyDelivery, which is exactly where it should
@@ -219,18 +295,18 @@ jobs:
         # the correct fix teaches people to delete the guard, so it now asserts the PROPERTY —
         # the route verifies before it parses, and refuses — rather than one file's spelling.
         run: |
-          grep -q 'verifyInbound(' src/server.ts \
+          grep -q 'verifyInbound(' src/routes.ts \
             || { echo '::error::the event signature check is gone; POST /v1/events is a reward-anyone endpoint'; exit 1; }
           # Verified over the RAW BYTES, before JSON.parse: parsing first hands the parser to an
           # unauthenticated caller. The verify call must come before the first parse in the file.
-          verify_at=$(grep -n 'verifyInbound(' src/server.ts | head -1 | cut -d: -f1)
-          parse_at=$(grep -n 'JSON.parse(raw' src/server.ts | head -1 | cut -d: -f1)
+          verify_at=$(grep -n 'verifyInbound(' src/routes.ts | head -1 | cut -d: -f1)
+          parse_at=$(grep -n 'JSON.parse(raw' src/routes.ts | head -1 | cut -d: -f1)
           if [ -z "$parse_at" ] || [ "$verify_at" -ge "$parse_at" ]; then
             echo '::error::the signature is no longer checked BEFORE the body is parsed'
             exit 1
           fi
           # And a failed check still refuses. 403, not 401: the MAC is the credential.
-          grep -q "403, 'bad_signature'" src/server.ts \
+          grep -q "403, 'bad_signature'" src/routes.ts \
             || { echo '::error::a bad event signature no longer answers 403'; exit 1; }
           # The scheme itself is the contract's, imported rather than copied. A local sha256=<hmac>
           # in the signing path is the drift that made every delivery to this service 403 for the
@@ -241,8 +317,142 @@ jobs:
 
       - name: A battle submission still requires an idempotency key
         run: |
-          grep -q 'idempotency-key' src/server.ts \
+          grep -q 'idempotency-key' src/routes.ts \
             || { echo '::error::a battle submission no longer requires an Idempotency-Key; a retry re-applies'; exit 1; }
+
+      # ── THE ABSORBED MODULE'S GUARDS, REPOINTED ─────────────────────────────────────────────
+      #
+      # Wave M3 moved micro-aetherholm's source under `src/aetherholm/`. Its repository keeps its
+      # own copy of these steps; the merged repository needs them too, or the code that came in
+      # arrives with its controls left behind. Every path below is the only thing that changed.
+
+      - name: The absorbed world's schema invariants still exist
+        run: |
+          grep -q 'cities_stocks_settled_within_caps' src/aetherholm/migrations.ts \
+            || { echo '::error::the stock-settlement CHECK is gone; a settlement could write a negative or above-cap stock'; exit 1; }
+          grep -q 'cities_one_per_player_per_island' src/aetherholm/migrations.ts \
+            || { echo '::error::the one-city-per-player-per-island partial unique is gone; a second city is representable'; exit 1; }
+          grep -q 'provisions_entitlement_uniq' src/aetherholm/migrations.ts \
+            || { echo '::error::the provision idempotency unique is gone; one purchase could raise two skerries'; exit 1; }
+          grep -q 'seasons_one_open' src/aetherholm/migrations.ts \
+            || { echo '::error::the single-open-season index is gone; two racing replicas could open two worlds'; exit 1; }
+          grep -q 'battles_fleet_uniq' src/aetherholm/migrations.ts \
+            || { echo '::error::the one-battle-per-arrival unique is gone; two replicas racing one arrival could fight twice'; exit 1; }
+          grep -q 'fleets_cargo_within_hold' src/aetherholm/migrations.ts \
+            || { echo '::error::the deferred cargo-within-hold constraint is gone; a fleet could depart overloaded'; exit 1; }
+          grep -q 'city_ships_count_non_negative' src/aetherholm/migrations.ts \
+            || { echo '::error::the garrison CHECK is gone; a launch could take ships a garrison does not hold'; exit 1; }
+          grep -q 'seasons_sealed_immutable' src/aetherholm/migrations.ts \
+            || { echo '::error::the seal trigger is gone; sealed history would be editable (doc §9.5)'; exit 1; }
+          grep -q 'battles_immutable' src/aetherholm/migrations.ts \
+            || { echo '::error::the battles append-only trigger is gone; a battle report could be rewritten'; exit 1; }
+
+      # Rule 6 of docs/ecosystem/03 §2. This module stored a user_id in nine places and erased none
+      # of them on request; a deletion reported success and left every city standing.
+      #
+      # `/v1/events` IS NO LONGER THIS MODULE'S ROUTE — the merged process serves one webhook
+      # (src/routes.ts) which verifies once and fans out to every module that subscribes, because
+      # BOTH titles consume `identity.user.deleted`. So the route grep moved to the host's file and
+      # the subscription is checked where the module now declares it.
+      - name: The absorbed module's right to erasure is still wired up, and still one-way
+        run: |
+          grep -q "'identity.user.deleted'" src/aetherholm/erasure.ts \
+            || { echo '::error::the erasure topic is gone; a deletion request would silently do nothing'; exit 1; }
+          grep -q "'/v1/events'" src/routes.ts \
+            || { echo '::error::the inbound event webhook is gone; identity.user.deleted cannot be delivered'; exit 1; }
+          grep -q 'SUBSCRIBED_TOPICS' src/aetherholm/routes.ts \
+            || { echo '::error::the absorbed module no longer declares its topics, so the fan-out cannot find it'; exit 1; }
+          grep -q 'aetherholm_erasure_one_way' src/aetherholm/migrations.ts \
+            || { echo '::error::the one-way erasure trigger is gone; an anonymised row could be re-attributed to a person'; exit 1; }
+          grep -q 'archipelagos_owner_subject_shape' src/aetherholm/migrations.ts \
+            || { echo '::error::the erased-owner CHECK is gone; an erased skerry owner is no longer distinguishable from a real one'; exit 1; }
+          grep -q 'chronicles_rewrite_is_declared' src/aetherholm/migrations.ts \
+            || { echo '::error::the redacted-chronicle CHECK is gone; a redacted chronicle could claim to be intact'; exit 1; }
+          grep -q 'digest_at_sealing' src/aetherholm/migrations.ts \
+            || { echo '::error::digest_at_sealing is gone; a redacted chronicle would lose the record of what it used to hash to'; exit 1; }
+
+      # THE ONE THAT THE MOVE ITSELF WOULD HAVE BROKEN. It compares the grep's result to an exact
+      # path, so relocating the file makes it fail — loudly, which is the good version of this
+      # failure. The count of places that set the flag must stay at one, in the handler.
+      - name: Only the absorbed module's erasure handler may unlock immutable history
+        run: |
+          setters=$(grep -rl "set_config('aetherholm.erasure'" src --include='*.ts' \
+                    | grep -v '\.test\.ts$' || true)
+          if [ "$setters" != "src/aetherholm/erasure.ts" ]; then
+            echo "::error::aetherholm.erasure is set outside src/aetherholm/erasure.ts: ${setters:-<nowhere>}"
+            exit 1
+          fi
+          echo 'ok: one setter, in the erasure handler'
+
+      - name: Neither title holds money
+        # No balance or Shard column in EITHER schema: the Charter and season pass are billing
+        # products, cosmetics are worlds entitlements, resources are game material. A balance column
+        # is the first step of a second ledger. Checked per module, because the merge doubled the
+        # number of schemas one repository can add one to.
+        run: |
+          for f in src/migrations.ts src/aetherholm/migrations.ts; do
+            if grep -nE '^\s+(balance|shards|held_amount|available)\s' "$f"; then
+              echo "::error::a balance column appeared in ${f}; the ledger owns balances"
+              exit 1
+            fi
+          done
+          echo 'ok: no balance column in either schema'
+
+      - name: A queue submission still requires an idempotency key
+        run: |
+          grep -q 'idempotency-key' src/aetherholm/routes.ts \
+            || { echo '::error::a queue submission no longer requires an Idempotency-Key; a retry re-charges'; exit 1; }
+
+      - name: The provision path still cannot reach the aegis
+        # The aegis is free at founding and never sold (20-aetherholm.md §4). The suite proves the
+        # behaviour; this proves the guard test is still present.
+        run: |
+          grep -q 'aegis' src/aetherholm/titlecontract.test.ts \
+            || { echo '::error::the aegis-absence assertion is gone from the title-contract suite'; exit 1; }
+
+      # ── THE MERGE'S OWN CONTROLS ────────────────────────────────────────────────────────────
+      #
+      # The suites prove these WORK — `merged.test.ts` goes red in three places if the selector
+      # stamp goes and three more if the fan-out goes. These prove they are still THERE, in the
+      # files a reviewer would look at, because both regressions are silent at runtime: a handler on
+      # the wrong handle finds a table of the same name and succeeds, and a dropped fan-out answers
+      # 202 to a deletion it did not perform.
+      - name: Two databases stay unreachable from each other's handlers
+        run: |
+          grep -q 'readonly sql?: NetworkSql' src/kernel.ts \
+            || { echo '::error::RouteSpec.sql is gone; a mounted module would read the host database — and six tables share a name'; exit 1; }
+          grep -q 'matched?.sql ?? deps.sql' src/kernel.ts \
+            || { echo '::error::the kernel no longer resolves the handle from the ROUTE selector; every mounted route reads the host database'; exit 1; }
+          # And the module still stamps it over its whole table.
+          grep -q 'handle: spec.handle, sql' src/aetherholm/module.ts \
+            || { echo '::error::the absorbed module no longer stamps its selector on the routes it mounts'; exit 1; }
+          # The migrator refuses two modules in one database before it issues a statement.
+          grep -q 'assertDistinct(targets)' src/migrator.ts \
+            || { echo '::error::the migrator no longer refuses two modules pointed at one database'; exit 1; }
+          echo 'ok: the route selector, the kernel resolution, the module stamp and the migrator refusal'
+
+      - name: One webhook, and it reaches BOTH titles
+        # Both subscribe to identity.user.deleted. A single endpoint routing it to one module
+        # answers 202 to a deletion half of which never happened, and nothing retries.
+        run: |
+          grep -q 'readonly inbound?: readonly InboundSink\[\]' src/routes.ts \
+            || { echo '::error::the fan-out is gone; identity.user.deleted would reach one title only'; exit 1; }
+          grep -q 'inbound: \[aetherholm.inbound\]' src/index.ts \
+            || { echo '::error::the composition root no longer wires the absorbed module into the webhook'; exit 1; }
+          # And the module drops its own copy of the route, so it cannot be silently shadowed.
+          grep -q "'/v1/events'" src/aetherholm/module.ts \
+            || { echo '::error::the absorbed module no longer drops its shadowed /v1/events'; exit 1; }
+          echo 'ok: one verified webhook, fanned out to every subscribing module'
+
+      - name: The two job planes cannot be summed into one series
+        # Both titles register a job kind called `outbox.relay`, exactly. `jobs_pending` and
+        # `jobs_overdue` carry no kind at all, so an unlabelled write erases the other module's.
+        run: |
+          grep -q "withLabels({ module: MODULE_LABEL })" src/aetherholm/module.ts \
+            || { echo '::error::the absorbed module writes job metrics unlabelled; its queue depth would erase emberkin'"'"'s'; exit 1; }
+          grep -q "withLabels({ module: SERVICE })" src/index.ts \
+            || { echo '::error::the host writes job metrics unlabelled; its queue depth would erase the absorbed module'"'"'s'; exit 1; }
+          echo 'ok: both job planes are labelled by module'
 
       - name: The service token is EXCHANGED, not held for the life of the process
         # micro-org #228. `servicetoken.test.ts` proves the refresh WORKS; this proves it is still

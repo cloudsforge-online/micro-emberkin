@@ -61,7 +61,6 @@ before(async () => {
     producer: 'emberkin',
     data,
     billing,
-    queue: { enqueue: async (o) => void enqueued.push({ kind: o.kind, key: o.key }) },
     queueFor: () => ({ enqueue: async (o) => void enqueued.push({ kind: o.kind, key: o.key }) }),
     eventAcceptSecrets: [SECRET],
   });
