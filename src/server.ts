@@ -97,22 +97,25 @@ export function createServer(deps: ServerDeps): Server {
 }
 
 /**
- * The listener this process actually runs: emberkin's routes, then aetherholm's.
+ * The listener this process actually runs: emberkin's routes, then every mounted module's.
  *
  * ══════════════════════════════════════════════════════════════════════════════════════════════
- * **TWO DEPENDENCY BAGS, NEVER ONE.** `deps` is emberkin's and nothing else; `mounted` arrived as
- * closures that had already captured a bag this function has no name for. That asymmetry is the
- * merge's central safety property — this signature CANNOT be handed aetherholm's database, its
- * queue or its producer name, because there is no parameter one would arrive through.
+ * **N DEPENDENCY BAGS, NEVER ONE.** `deps` is emberkin's and nothing else; `mounted` arrived as
+ * closures that had already captured bags this function has no name for. That asymmetry is the
+ * merge's central safety property — this signature CANNOT be handed aetherholm's or nda's
+ * database, queue or producer name, because there is no parameter one would arrive through.
  *
  * Order is first-wins, and emberkin goes first for one reason that is not a preference:
- * `/livez`, `/readyz` and `/metrics` are emberkin's in this process (see `aetherholm/module.ts`'s
- * `mountableRoutes` for why), and a mounted module must not be able to shadow them by accident.
+ * `/livez`, `/readyz` and `/metrics` are emberkin's in this process (see each module's `UNMOUNTED`
+ * for why), and a mounted module must not be able to shadow them by accident. Order among the
+ * MOUNTED modules is not load-bearing and must never become so — `mergedroutes.test.ts` asserts
+ * every pair of route tables overlaps on exactly the four dropped paths, which is what makes the
+ * concatenation order irrelevant rather than merely undocumented.
  *
- * Checked, not assumed: `mergedroutes.test.ts` computes the two path sets and asserts the overlap
- * is EXACTLY the four paths the module filters out — the three operational ones and `POST
- * /v1/events`, which one handler serves for the whole process and fans out. A fifth collision
- * appearing later is a red test rather than a route that silently stops being reachable.
+ * Checked, not assumed: `mergedroutes.test.ts` computes the path sets and asserts each overlap is
+ * EXACTLY the four paths a module filters out — the three operational ones and `POST /v1/events`,
+ * which one handler serves for the whole process and fans out. A fifth collision appearing later
+ * is a red test rather than a route that silently stops being reachable.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 export function createMergedServer(deps: ServerDeps, mounted: readonly RouteSpec<Db>[]): Server {

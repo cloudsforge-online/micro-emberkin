@@ -145,59 +145,86 @@ pnpm typecheck
 pnpm verify        # engine demo: play a battle from a seed, no DB needed
 
 # The full suite runs against a real Postgres (deferred constraints, leases, advisory locks) —
-# and against TWO DATABASES, because this deployable is two titles. `src/merged.test.ts` needs
-# both at once; each title's own suite needs only its own.
+# and against THREE DATABASES, because this deployable is three titles. `src/merged.test.ts` needs
+# all three at once; each title's own suite needs only its own.
 docker run -d --rm --name emberkin-pg -e POSTGRES_USER=emberkin -e POSTGRES_PASSWORD=emberkin \
   -e POSTGRES_DB=emberkin_test -p 55440:5432 postgres:17-alpine
-PGPASSWORD=emberkin psql -h 127.0.0.1 -p 55440 -U emberkin -d emberkin_test \
-  -c 'create database aetherholm_test'
+for db in aetherholm_test nda_test; do
+  PGPASSWORD=emberkin psql -h 127.0.0.1 -p 55440 -U emberkin -d emberkin_test \
+    -c "create database ${db}"
+done
 EMBERKIN_TEST_DATABASE_URL=postgres://emberkin:emberkin@127.0.0.1:55440/emberkin_test \
 AETHERHOLM_TEST_DATABASE_URL=postgres://emberkin:emberkin@127.0.0.1:55440/aetherholm_test \
+NDA_TEST_DATABASE_URL=postgres://emberkin:emberkin@127.0.0.1:55440/nda_test \
   pnpm test
 ```
 
-Migrations are a separate one-shot (`pnpm migrate`), never run at boot; it migrates **both**
-databases in one process and refuses to start if the two DSNs address the same one. `index.ts`
+Migrations are a separate one-shot (`pnpm migrate`), never run at boot; it migrates **all three**
+databases in one process and refuses to start if any two DSNs address the same one. `index.ts`
 asserts the schema version and refuses to serve below it. Copy `.env.example` to `.env` for local
 work.
 
-## One process, two titles (wave M3)
+## One process, three titles (waves M3 and M4a)
 
 Since wave M3 of micro-deploy `docs/service-merge-plan.md` this deployable also runs
-**Aetherholm** — the sky-island strategy title — as a module under `src/aetherholm/`. One image,
-one listener, one `/livez`, one `/readyz`, one `/metrics`, one migrate entrypoint.
+**Aetherholm** — the sky-island strategy title — as a module under `src/aetherholm/`, and since
+wave M4a it also runs **Ninety Days After** under `src/nda/`. One image, one listener, one
+`/livez`, one `/readyz`, one `/metrics`, one migrate entrypoint.
 
-Emberkin absorbs on the **upstream** argument rather than on size (aetherholm is the larger at 7.6k
-vs 6.9k LOC): this service already integrates ledger, billing, worlds and identity and holds a
-service credential, while aetherholm calls nothing at all. Folding the zero-upstream side into the
-four-upstream side does not widen the four-upstream side's reach; the reverse would have handed a
-title with no outbound calls a credential that can post to the ledger.
+Emberkin absorbs on the **upstream** argument rather than on size: this service already integrates
+ledger, billing, worlds and identity and holds a service credential; aetherholm calls nothing at
+all, and nda calls billing, worlds and identity — a strict **subset** of what this service already
+reaches. So the merged process reaches exactly the peers emberkin alone reached, and not one more.
+`src/mergedupstreams.test.ts` measures that rather than asserting it, so a module that later grows
+a client makes the build red in the commit that adds it.
 
-**The two databases are kept and never merged**, under their existing `EMBERKIN_DATABASE_URL` and
-`AETHERHOLM_DATABASE_URL`. That is not caution — the two schemas own **six tables of the same
-name** (`outbox`, `event_subscriptions`, `outbox_deliveries`, `inbox`, `seasons`, `battles`), so a
-handler on the wrong handle does not fail: `select … from seasons` succeeds and returns another
-game's rows. Four things keep them apart, each of which fails on its own:
+**`tessera` was considered for M4a and refused.** `GET /v1/title` and `POST /v1/provision` are
+frozen constants in `@cloudsforge/contracts-worlds`, and aetherholm and tessera both mount them.
+Matching is first-wins, so in one process the second title's descriptor and provision handler are
+dead — and `worlds` provisioning a paid tessera ward would be answered, with a 200, by aetherholm.
+There is no `UNMOUNTED` entry that fixes it: `worlds` addresses a title by base URL and appends a
+fixed path, so unlike `/v1/events` there is no second way in. `src/mergedroutes.test.ts` pins that
+so the next person to propose it finds the reason before the rework.
+
+**The three databases are kept and never merged**, under their existing `EMBERKIN_DATABASE_URL`,
+`AETHERHOLM_DATABASE_URL` and `NDA_DATABASE_URL`. That is not caution — **four table names exist in
+all three schemas with the same columns** (`outbox`, `event_subscriptions`, `outbox_deliveries`,
+`inbox`), and emberkin and aetherholm share `seasons` and `battles` on top. A handler on the wrong
+handle does not fail: `select … from seasons` succeeds and returns another game's rows, and
+`insert into inbox …` succeeds and dedupes an event that database has never seen. Four things keep
+them apart, each of which fails on its own:
 
 | | |
 | --- | --- |
 | `RouteSpec.sql` (`src/kernel.ts`) | a route names the SELECTOR its `ctx.sql` comes from; the kernel resolves it at the edge of the request, beside the network |
-| closures, not a `deps` parameter | each module's handlers close over their own bag, so no route can reach the other's queue or producer |
-| `aetherholm/env.ts` | imported by `aetherholm/module.ts` and nothing else, so the composition root never holds that module's DSN |
+| closures, not a `deps` parameter | each module's handlers close over their own bag, so no route can reach another's queue or producer |
+| `<module>/env.ts` | imported by that module's `module.ts` and nothing else, so the composition root never holds a module's DSN or credential |
 | `assertDistinct` (`src/migratortargets.ts`) | the migrator refuses two modules pointed at one database before it issues a statement |
 
-**One webhook, fanned out.** Both titles subscribe to `identity.user.deleted`. `POST /v1/events`
-verifies the MAC once — both read the same estate-wide `OUTBOX_SIGNING_SECRET` — and then delivers
-to every module that subscribes, each against its own database and its own `inbox`. Routing it to
-one module would answer 202 to a deletion half of which never happened, and nothing would retry
-because nothing failed.
+**One webhook, fanned out.** All three titles subscribe to `identity.user.deleted`, and emberkin
+and nda both subscribe to `billing.entitlement.granted`. `POST /v1/events` verifies the MAC once —
+every module reads the same estate-wide `OUTBOX_SIGNING_SECRET` / `OUTBOX_ACCEPT_SECRETS` — and
+then delivers to every module that subscribes, each against its own database and its own `inbox`.
+Routing it to one module would answer 202 to a deletion two thirds of which never happened, and
+nothing would retry because nothing failed. That one module reads *one* secret is checked too, in
+`src/mergedupstreams.test.ts`: it is the second reason tessera could not join, since its inbound
+accept list comes from an `INBOUND_SIGNING_SECRET` this pod has never heard of.
 
-**Job metrics carry a `module` label.** Both titles register a job kind called `outbox.relay`,
-exactly; `jobs_pending` and `jobs_overdue` carry no kind at all. Without the label one module's
-sample erases the other's every scrape, and a wedged queue reads as *absent* rather than high.
+**Job metrics carry a `module` label.** All three titles register a job kind called `outbox.relay`,
+exactly, and emberkin and nda both register `achievement.sweep` and `achievement.deliver` — two
+different games' bridges into two different `worlds` profiles. `jobs_pending` and `jobs_overdue`
+carry no kind at all. Without the label one module's sample erases the others' every scrape, and a
+wedged queue reads as *absent* rather than high.
 
-`src/merged.test.ts` drives the whole of it over a real socket against both databases; each title's
-own suite still drives its own listener alone and passes unchanged.
+**`/readyz` reflects every module, and that has a cost worth stating.** It carries a hard probe for
+each database plus `nda-identity-credential`, which is hard because nda's standalone readiness was.
+emberkin publishes no `/readyz` router of its own, so `cf-api-aetherholm-readyz` is the only public
+readiness in this pod — meaning an unset `NDA_IDENTITY_CREDENTIAL` renders as *aetherholm* being
+down, to a player who has never heard of nda. The alternative, a soft probe, is worse: a title with
+no credential would take traffic and 503 every write.
+
+`src/merged.test.ts` drives the whole of it over a real socket against all three databases; each
+title's own suite still drives its own listener alone and passes unchanged.
 
 ## HTTP surface
 
@@ -211,8 +238,10 @@ own suite still drives its own listener alone and passes unchanged.
 - `PUT /v1/saves/me/cosmetics` — equip a cosmetic, gated by a billing entitlement, never a stat
 - `GET /v1/saves/me/achievements` · `GET /v1/content/dex`
 
-Aetherholm's surface is served on the same listener and documented in its own repository: the title
-contract (`GET /v1/title`, `POST /v1/provision`) plus city, fleet, alliance and chronicle play under
+Ninety Days After's surface is served on the same listener and documented in its own repository:
+thirty routes under `/v1/worlds`, which is also the prefix the public API gateway routes to this
+pod. Aetherholm's surface is served on the same listener and documented in its own repository: the
+title contract (`GET /v1/title`, `POST /v1/provision`) plus city, fleet, alliance and chronicle play under
 `/v1/`. The two path sets are disjoint apart from the three operational routes and the shared
 webhook, and `src/mergedroutes.test.ts` fails if a fifth collision ever appears — a colliding path
 is not an error, it is a route that silently stops being reachable.

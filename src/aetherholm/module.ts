@@ -103,10 +103,10 @@ export interface HostRuntime {
    * This module registers its `aetherholm_*` specs on it directly (those names collide with
    * nothing) and writes its JOB metrics through `metrics.withLabels({ module })`, which is the
    * family that does collide — see `MODULE_LABEL`. A view shares the registry's spec and series
-   * maps by reference, so one endpoint carries both modules either way.
+   * maps by reference, so one endpoint carries every module either way.
    */
   readonly metrics: Metrics;
-  /** The host's identity verifier. One JWKS client for the process; both modules read it. */
+  /** The host's identity verifier. One JWKS client for the process; every module reads it. */
   readonly verifier: PrincipalVerifier;
   /**
    * The host `Lifecycle`'s `claimingJobs`, as a function.
@@ -141,7 +141,7 @@ export interface AetherholmModule {
   readonly routes: readonly RouteSpec<Db>[];
   /**
    * This module's half of the process's one event webhook. See `InboundSink` in `../routes.ts`
-   * for why a fan-out is the only correct shape when both titles subscribe to
+   * for why a fan-out is the only correct shape when every title subscribes to
    * `identity.user.deleted`.
    */
   readonly inbound: InboundSink;
@@ -185,7 +185,7 @@ export async function createAetherholmModule(host: HostRuntime): Promise<Aetherh
   //    there collides with anything.
   //
   //    `jobMetrics` is this module's labelled VIEW, and it exists for the families that DO collide.
-  //    See `MODULE_LABEL`. A view writes into the same series maps, so both modules are still on
+  //    See `MODULE_LABEL`. A view writes into the same series maps, so every module is still on
   //    one page — see `Metrics.withLabels` (micro-runtime#9).
   const metrics = host.metrics;
   const jobMetrics = metrics.withLabels({ module: MODULE_LABEL });
@@ -279,11 +279,11 @@ export async function createAetherholmModule(host: HostRuntime): Promise<Aetherh
   //
   // A `JobRunner` is bound to ONE `JobQueue`, which is bound to ONE `sql` handle, which is one
   // database. Two databases therefore cannot share a runner even if the kinds did not collide —
-  // and they do: both titles register `outbox.relay`, so `runner.register` would throw
+  // and they do: every title registers `outbox.relay`, so `runner.register` would throw
   // `handler already registered for outbox.relay` at boot.
   //
   // That throw is a GOOD failure and it is deliberately still reachable: `jobcomposition.test.ts`
-  // builds one runner, registers both modules' handlers on it, and asserts it throws. The point of
+  // builds one runner, registers two modules' handlers on it, and asserts it throws. The point of
   // keeping it provable is that the SILENT shape is the one next door — emberkin already runs one
   // runner per network plane, so "add another runner" is the natural move, and two runners both
   // counting `kind="outbox.relay"` into an unlabelled registry is a sum nothing complains about.
@@ -295,7 +295,7 @@ export async function createAetherholmModule(host: HostRuntime): Promise<Aetherh
     pollMs: 1_000,
     // Both halves of the answer. `started` is this module's own gate — nothing may be claimed
     // before the host has finished booting — and `host.claimingJobs()` is the drain, which is the
-    // host's to decide and must apply to both modules at once.
+    // host's to decide and must apply to every module at once.
     shouldClaim: () => started && host.claimingJobs(),
     onEvent: (event) => {
       // EVERY line here goes through the labelled view. `kind` alone is not enough: the other

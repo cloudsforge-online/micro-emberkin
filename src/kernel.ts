@@ -7,7 +7,7 @@
  * error. That is the whole point of it: `mountRoutes` can be handed one title's routes or two
  * titles' routes concatenated, and it cannot tell the difference.
  *
- * The seam exists so that a second game module can be mounted in this process without
+ * The seam exists so that further game modules can be mounted in this process without
  * re-implementing the request lifecycle — the network attribution, the per-request handle, the
  * in-flight gauge and the duration histogram — which is exactly the code that is dangerous to
  * write twice (micro-deploy `docs/service-merge-plan.md`, wave M3).
@@ -18,20 +18,22 @@
  * the same design for the same reasons, including the one that matters most below.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  *
- * ── WAVE M3: TWO THINGS THIS GREW THAT A ONE-MODULE SERVER DID NOT NEED ────────────────────────
+ * ── WAVES M3/M4a: TWO THINGS THIS GREW THAT A ONE-MODULE SERVER DID NOT NEED ───────────────────
  *
  *   1. **`TSql` is a type parameter.** The kernel names the minimal `Sql` from `@cloudsforge/db`;
- *      both titles' routes read `postgres`'s own handle, because their queries use tagged
+ *      every title's routes read `postgres`'s own handle, because their queries use tagged
  *      templates the minimal interface does not publish. A parameter rather than a winner picked
  *      and cast at every read.
  *   2. **A route may name the SELECTOR its `ctx.sql` is resolved from** (`RouteSpec.sql`). This is
  *      the one thing this merge genuinely could not do without, and it is worse here than it was
- *      in M1: emberkin and aetherholm own SIX tables of the same name — `outbox`,
- *      `event_subscriptions`, `outbox_deliveries`, `inbox`, `seasons` and `battles`. A handler
- *      handed the other module's handle does not fail. `select … from seasons` SUCCEEDS, returns
- *      the other title's rows, and reports nothing. Which database a route reads is therefore a
- *      property of the route declaration, resolved once at the edge of the request exactly where
- *      the network is. `merged.test.ts` goes red in two places if the stamp is removed.
+ *      in M1: FOUR table names — `outbox`, `event_subscriptions`, `outbox_deliveries` and `inbox`
+ *      — exist in ALL THREE of this process's schemas with the same columns, and emberkin and
+ *      aetherholm own `seasons` and `battles` as well. A handler handed another module's handle
+ *      does not fail. `select … from seasons` SUCCEEDS and returns the other title's rows;
+ *      `insert into inbox …` SUCCEEDS and dedupes an event that database has never seen. Which
+ *      database a route reads is therefore a property of the route declaration, resolved once at
+ *      the edge of the request exactly where the network is. `merged.test.ts` goes red in two
+ *      places if the stamp is removed.
  */
 
 import {

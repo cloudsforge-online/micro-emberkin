@@ -94,13 +94,15 @@ export const SUBSCRIBED_TOPICS: ReadonlySet<string> = new Set([GRANTED_TOPIC, DE
  * What one MOUNTED module needs from the process's single event webhook.
  *
  * ══════════════════════════════════════════════════════════════════════════════════════════════
- * **`identity.user.deleted` IS SUBSCRIBED BY BOTH TITLES, AND THAT IS WHY THIS EXISTS.**
+ * **`identity.user.deleted` IS SUBSCRIBED BY EVERY TITLE IN THIS PROCESS, AND THAT IS WHY THIS
+ * EXISTS.**
  *
  * Before the merge, identity's relay held one subscription row per service and delivered the same
- * erasure twice — once to emberkin, once to aetherholm — and each erased its own nine-or-so
+ * erasure once per subscriber — to emberkin, to aetherholm, to nda — and each erased its own
  * `user_id` columns. After the merge there is ONE endpoint. Route the event to one module and the
- * other title never erases: the deletion answers 202, the producer marks it delivered, and every
- * city that person founded is still standing. There is no retry, because nothing failed.
+ * others never erase: the deletion answers 202, the producer marks it delivered, and every city
+ * that person founded and every homestead they built is still standing. There is no retry, because
+ * nothing failed.
  *
  * Registering TWO subscription rows both pointing at the merged URL does not fix it either — it is
  * worse. The same event id would arrive twice at one endpoint and `withInbox` would dedupe the
@@ -108,7 +110,7 @@ export const SUBSCRIBED_TOPICS: ReadonlySet<string> = new Set([GRANTED_TOPIC, DE
  *
  * So the route verifies ONCE and fans out to every module that subscribes, each against its own
  * database, its own `inbox` table and its own erasure. `merged.test.ts` fails if the fan-out is
- * removed, and it checks the aetherholm database directly rather than trusting the 202.
+ * removed, and it checks each mounted module's database directly rather than trusting the 202.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  *
  * `deliver` takes the NETWORK and never a handle. The sink resolves its own module's handle from
@@ -116,7 +118,7 @@ export const SUBSCRIBED_TOPICS: ReadonlySet<string> = new Set([GRANTED_TOPIC, DE
  * there is no parameter it would arrive through.
  */
 export interface InboundSink {
-  /** For the log line and the reply. `aetherholm`. */
+  /** For the log line and the reply. `aetherholm`, `nda`. */
   readonly module: string;
   readonly topics: ReadonlySet<string>;
   deliver(
@@ -166,7 +168,7 @@ export interface ServerDeps extends MountDeps {
   readonly eventAcceptSecrets: readonly string[];
   /**
    * The modules mounted beside this one that also consume the event bus. Empty for the standalone
-   * listener, one entry (aetherholm) in the merged process. See `InboundSink`.
+   * listener, two entries (aetherholm, nda) in the merged process. See `InboundSink`.
    */
   readonly inbound?: readonly InboundSink[];
   readonly beforeScrape?: () => Promise<void>;
@@ -188,8 +190,8 @@ class BadRequestError extends Error {
  *
  * This is the former `handle`: it used to sit between the kernel and the dispatch, and it wrapped
  * ROUTING as well as the route. Now that a spec is one closure, the wrap is per handler — and it
- * is per MODULE, which is the point. aetherholm's twelve domain errors map through aetherholm's
- * copy of this and never through emberkin's.
+ * is per MODULE, which is the point. aetherholm's twelve domain errors and nda's fifteen map
+ * through their own copies of this and never through emberkin's.
  */
 function guarded(
   handle: (ctx: RequestContext<Db>) => Promise<Reply>,
@@ -268,7 +270,7 @@ export function createRoutes(deps: ServerDeps): RouteSpec<Db>[] {
       // producers are on two schemes: identity signs the contract's `cf-signature`, billing still
       // sends the legacy `x-cloudsforge-signature`. `verifyInbound` carries the whole argument.
       //
-      // ONE verification for the whole process. Both titles read the same estate-wide
+      // ONE verification for the whole process. EVERY module reads the same estate-wide
       // `OUTBOX_SIGNING_SECRET` / `OUTBOX_ACCEPT_SECRETS`, from one file, so a delivery that
       // verifies for one verifies for the other — which is what makes a single webhook honest
       // rather than a shortcut. If that ever stops being true this route must verify per sink.
