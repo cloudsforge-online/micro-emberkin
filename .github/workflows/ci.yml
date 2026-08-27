@@ -37,24 +37,27 @@ jobs:
     uses: cloudsforge-online/micro-org/.github/workflows/service-ci.yml@main
     with:
       service: emberkin
-      # ── TWO DATABASES, DECLARED, BECAUSE THIS DEPLOYABLE IS TWO TITLES ──────────────────────
+      # ── THREE DATABASES, DECLARED, BECAUSE THIS DEPLOYABLE IS THREE TITLES ─────────────────
       #
-      # Wave M3 of micro-deploy `docs/service-merge-plan.md`: emberkin absorbed aetherholm. The
-      # schemas are NOT merged — they own six tables of the same name — so the reusable workflow
-      # creates `ci_emberkin_test` and `ci_aetherholm_test` and exports the `_TEST_` pair for each.
-      # Pointing both at one database would let one suite's TRUNCATE empty the other's rows
-      # mid-test, which reads as a flake rather than as a configuration mistake.
+      # Waves M3 and M4a of micro-deploy `docs/service-merge-plan.md`: emberkin absorbed aetherholm
+      # and then nda. The schemas are NOT merged — FOUR table names (`outbox`,
+      # `event_subscriptions`, `outbox_deliveries`, `inbox`) exist in all three, with the same
+      # columns, and emberkin and aetherholm share `seasons` and `battles` on top — so the reusable
+      # workflow creates `ci_emberkin_test`, `ci_aetherholm_test` and `ci_nda_test` and exports the
+      # `_TEST_` pair for each. Pointing any two at one database would let one suite's TRUNCATE
+      # empty another's rows mid-test, which reads as a flake rather than as a configuration
+      # mistake.
       #
-      # AND THE SKIP SCAN IS WHY THE SECOND NAME MUST BE HERE RATHER THAN LEFT IMPLICIT. A name in
-      # this list is treated as OWN: if its suite skips, the build FAILS. A name absent from it
-      # skipping would be filed as "a cross-service tier stood down" and go green — which is
-      # exactly the false green that block exists to end, and it would hide 163 aetherholm
+      # AND THE SKIP SCAN IS WHY EVERY NAME MUST BE HERE RATHER THAN LEFT IMPLICIT. A name in this
+      # list is treated as OWN: if its suite skips, the build FAILS. A name absent from it skipping
+      # would be filed as "a cross-service tier stood down" and go green — which is exactly the
+      # false green that block exists to end, and it would hide 163 aetherholm and 106 nda
       # database-backed tests not running.
       #
       # `_TESTNET` names are deliberately NOT here: the workflow's suffix check demands
       # `%_DATABASE_URL` and would fail the build on `EMBERKIN_DATABASE_URL_TESTNET`. Nothing is
       # lost — no suite reads a testnet DSN.
-      database-env-var: EMBERKIN_DATABASE_URL AETHERHOLM_DATABASE_URL
+      database-env-var: EMBERKIN_DATABASE_URL AETHERHOLM_DATABASE_URL NDA_DATABASE_URL
       port: 4100
       # The image startup smoke test boots the real service, and `env.ts` validates its
       # configuration at import — so the container needs the variables it declares, not just a
@@ -92,6 +95,21 @@ jobs:
       # The legacy `static` mode is not left uncovered: the `migrate` job below still boots on a
       # generated `@token`-shaped JWT, so both branches of `requireOneCredentialSource` are exercised
       # by this file and a rolling deploy that has not yet swapped the variable is proven to start.
+      #
+      # ── WHAT WAVE M4a ADDED TO THIS LIST: ONE LINE ────────────────────────────────────────────
+      #
+      # `NDA_IDENTITY_CREDENTIAL`, and nothing else. `NDA_DATABASE_URL` arrives from the
+      # `database-env-var` list above, and every other variable that module reads — `IDENTITY_*`,
+      # `OUTBOX_SIGNING_SECRET`, `BILLING_URL`, `WORLDS_URL` — is already here under the same
+      # estate-wide name. That this list grew by one line IS the merge's argument stated as
+      # configuration, and `src/mergedupstreams.test.ts` is what keeps it true.
+      #
+      # It is not decoration: the nda module contributes a HARD `nda-identity-credential` probe, so
+      # without this the container's `/readyz` is 503 while its `/livez` — which is what this smoke
+      # test reads — stays 200. Exactly the kind of thing that is otherwise discovered on a deploy.
+      #
+      # EVERY LINE IN THIS BLOCK BECOMES ONE `-e` ARGUMENT, so a comment inside it is passed to
+      # `docker run` as an environment variable named `#`. The commentary lives out here.
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4001
@@ -100,6 +118,7 @@ jobs:
         BILLING_URL=http://127.0.0.1:4009
         WORLDS_URL=http://127.0.0.1:4000
         EMBERKIN_IDENTITY_CREDENTIAL=@credential
+        NDA_IDENTITY_CREDENTIAL=@credential
     secrets:
       # @cloudsforge/* resolves via link:../runtime, so the workflow checks out micro-runtime
       # and micro-contracts as siblings — both private, hence a contents:read token.
@@ -118,9 +137,9 @@ jobs:
     # the migrator run AS a deploy runs it, on EMPTY databases, and run TWICE to prove it is
     # idempotent — because a deploy re-runs the one-shot Job on every release.
     #
-    # Wave M3 made it two databases. `AETHERHOLM_DATABASE_URL` is created below rather than by the
-    # service container, which can only make one.
-    name: The migrator, on two empty databases
+    # Waves M3 and M4a made it three databases. `AETHERHOLM_DATABASE_URL` and `NDA_DATABASE_URL`
+    # are created below rather than by the service container, which can only make one.
+    name: The migrator, on three empty databases
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -144,6 +163,10 @@ jobs:
       # `create table seasons` racing and then one module's tables never created — with a migrator
       # that exits 0. Created in the step below; the service container makes only `POSTGRES_DB`.
       AETHERHOLM_DATABASE_URL: postgres://emberkin:emberkin@127.0.0.1:5432/aetherholm_test
+      # THE THIRD. Same argument, and `inbox` is the sharpest of the four names all three own: it
+      # has the SAME COLUMNS in every module, so a mis-aimed write is not a 500, it is a row that
+      # dedupes an event the database it landed in has never seen.
+      NDA_DATABASE_URL: postgres://emberkin:emberkin@127.0.0.1:5432/nda_test
       IDENTITY_JWKS_URL: http://127.0.0.1:4001/.well-known/jwks.json
       IDENTITY_ISSUER: http://127.0.0.1:4001
       LEDGER_URL: http://127.0.0.1:4007
@@ -208,15 +231,17 @@ jobs:
       - name: Install
         working-directory: emberkin
         run: pnpm install --frozen-lockfile
-      - name: The absorbed module's database
-        # The Postgres service creates one database. The second is made here, deliberately as a
-        # separate database on the same server rather than a schema in the first — see the note on
+      - name: The absorbed modules' databases
+        # The Postgres service creates one database. The other two are made here, deliberately as
+        # separate databases on the same server rather than schemas in the first — see the note on
         # AETHERHOLM_DATABASE_URL above.
         run: |
           set -euo pipefail
-          PGPASSWORD=emberkin psql -h 127.0.0.1 -U emberkin -d emberkin_test -v ON_ERROR_STOP=1 \
-            -c 'create database aetherholm_test'
-      - name: Migrate both test databases
+          for db in aetherholm_test nda_test; do
+            PGPASSWORD=emberkin psql -h 127.0.0.1 -U emberkin -d emberkin_test -v ON_ERROR_STOP=1 \
+              -c "create database ${db}"
+          done
+      - name: Migrate all three test databases
         working-directory: emberkin
         run: pnpm migrate
       - name: Migrating twice is a no-op
@@ -224,27 +249,39 @@ jobs:
         # A deploy re-runs the one-shot job on every release; a migrator that is not idempotent turns
         # the second deploy of an unchanged schema into an outage.
         run: pnpm migrate
-      - name: Both schemas are actually there, and in their OWN database
+      - name: All three schemas are actually there, and each in its OWN database
         # The failure this whole arrangement exists to prevent is a migrator that exits 0 having
         # created nothing. So the tables are counted rather than the exit code trusted, and each
-        # database is checked for a table only the OTHER module owns — which is what a shared
+        # database is checked for tables only the OTHER modules own — which is what a shared
         # ledger, or a target list pointed twice at one DSN, would produce.
         run: |
           set -euo pipefail
           q() { PGPASSWORD=emberkin psql -h 127.0.0.1 -U emberkin -d "$1" -tAc "$2"; }
-          emberkin_tables=$(q emberkin_test "select count(*) from information_schema.tables where table_schema='public'")
-          aetherholm_tables=$(q aetherholm_test "select count(*) from information_schema.tables where table_schema='public'")
-          echo "emberkin_test: ${emberkin_tables} tables; aetherholm_test: ${aetherholm_tables} tables"
-          [ "$emberkin_tables" -ge 10 ] || { echo '::error::emberkin_test is missing its schema'; exit 1; }
-          [ "$aetherholm_tables" -ge 22 ] || { echo '::error::aetherholm_test is missing its schema — the second migrator did not run'; exit 1; }
-          # `cities` is aetherholm's alone; `saves` is emberkin's alone. Each must be absent from
-          # the other database, or the two ledgers have been confused.
-          [ "$(q emberkin_test "select count(*) from information_schema.tables where table_name='cities'")" = "0" ] \
-            || { echo '::error::aetherholm tables were created in emberkin_test'; exit 1; }
-          [ "$(q aetherholm_test "select count(*) from information_schema.tables where table_name='saves'")" = "0" ] \
-            || { echo '::error::emberkin tables were created in aetherholm_test'; exit 1; }
+          # database:minimum-tables — the module's own TABLES length plus `jobs` and
+          # `schema_migrations`. A floor rather than an equality, so adding a migration is not a
+          # CI edit; low enough that a module whose migrator never ran cannot clear it.
+          for pair in emberkin_test:10 aetherholm_test:22 nda_test:17; do
+            db="${pair%%:*}"; floor="${pair##*:}"
+            n=$(q "$db" "select count(*) from information_schema.tables where table_schema='public'")
+            echo "${db}: ${n} tables (floor ${floor})"
+            [ "$n" -ge "$floor" ] || { echo "::error::${db} is missing its schema — that module's migrator did not run"; exit 1; }
+          done
+          # `saves` is emberkin's alone, `cities` aetherholm's alone, `worlds` nda's alone. Each
+          # must be absent from the other two databases, or the ledgers have been confused. Every
+          # ordered pair, because a check that only compared each module against ONE other is a
+          # check three modules can walk through.
+          for owner in emberkin_test:saves aetherholm_test:cities nda_test:worlds; do
+            odb="${owner%%:*}"; table="${owner##*:}"
+            [ "$(q "$odb" "select count(*) from information_schema.tables where table_name='${table}'")" = "1" ] \
+              || { echo "::error::${odb} does not have its own ${table}"; exit 1; }
+            for other in emberkin_test aetherholm_test nda_test; do
+              [ "$other" = "$odb" ] && continue
+              [ "$(q "$other" "select count(*) from information_schema.tables where table_name='${table}'")" = "0" ] \
+                || { echo "::error::${odb}'s ${table} was created in ${other}"; exit 1; }
+            done
+          done
           # And each ledger records its OWN module's versions, under its own service name.
-          for db in emberkin_test aetherholm_test; do
+          for db in emberkin_test aetherholm_test nda_test; do
             n=$(q "$db" "select count(*) from schema_migrations")
             echo "${db}: ${n} migrations recorded"
             [ "$n" -gt 0 ] || { echo "::error::${db} has an empty migration ledger"; exit 1; }
@@ -255,6 +292,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # ────────────────────────────────────────────────────────────────────────────────────────
+      # WAVE M4a BROUGHT THIS STEP WITH nda'S GUARDS, and it is worth keeping for all of them.
+      #
+      # Every check that reads it reads STRIPPED source — comments removed — for the reason
+      # micro-org's service-ci.yml rule 1 records, and which micro-nda's first version of this file
+      # walked straight into: a grep over raw source fires on the very comment that EXPLAINS the
+      # boundary. Its engine-purity check tripped on "the ancestor stamped randomUUID() on every
+      # report", and its no-ledger check tripped on the test asserting there is no ledger. A rule
+      # that punishes documenting the rule teaches people to delete the explanation, and the
+      # codebase loses exactly the comments that make a boundary survive a reviewer who was not
+      # there. This repository's own headers are long for the same reason and would trip the same
+      # way.
+      #
+      # The checks that read RAW source below are the ones asserting a constraint NAME appears in a
+      # migrations file, where a comment match is not a false positive worth the extra step.
+      # ────────────────────────────────────────────────────────────────────────────────────────
+      - name: Strip comments, so a rule cannot fire on its own rationale
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/stripped
+          while IFS= read -r f; do
+            mkdir -p "/tmp/stripped/$(dirname "$f")"
+            # Block comments first, then line comments that are not part of a '://' URL.
+            perl -0pe 's{/\*.*?\*/}{}gs' "$f" | perl -pe 's{(^|[^:])//.*$}{$1}' > "/tmp/stripped/$f"
+          done < <(find src -type f -name '*.ts' ! -name '*.test.ts' -print)
+          echo "stripped $(find /tmp/stripped -name '*.ts' | wc -l) non-test sources"
 
       # Asserted as text so a refactor cannot delete them without a red build. The tests prove they
       # WORK; these prove they are still THERE.
@@ -423,36 +487,153 @@ jobs:
             || { echo '::error::RouteSpec.sql is gone; a mounted module would read the host database — and six tables share a name'; exit 1; }
           grep -q 'matched?.sql ?? deps.sql' src/kernel.ts \
             || { echo '::error::the kernel no longer resolves the handle from the ROUTE selector; every mounted route reads the host database'; exit 1; }
-          # And the module still stamps it over its whole table.
+          # And EVERY mounted module still stamps it over its whole table.
           grep -q 'handle: spec.handle, sql' src/aetherholm/module.ts \
-            || { echo '::error::the absorbed module no longer stamps its selector on the routes it mounts'; exit 1; }
+            || { echo '::error::the aetherholm module no longer stamps its selector on the routes it mounts'; exit 1; }
+          grep -q 'export function mountableRoutes(deps: ServerDeps, sql: NetworkSql)' src/nda/server.ts \
+            || { echo '::error::the nda module no longer takes a selector to stamp on the routes it mounts'; exit 1; }
+          grep -qE '^ +sql,$' src/nda/server.ts \
+            || { echo '::error::the nda module no longer stamps its selector on the routes it mounts'; exit 1; }
           # The migrator refuses two modules in one database before it issues a statement.
           grep -q 'assertDistinct(targets)' src/migrator.ts \
             || { echo '::error::the migrator no longer refuses two modules pointed at one database'; exit 1; }
           echo 'ok: the route selector, the kernel resolution, the module stamp and the migrator refusal'
 
-      - name: One webhook, and it reaches BOTH titles
-        # Both subscribe to identity.user.deleted. A single endpoint routing it to one module
-        # answers 202 to a deletion half of which never happened, and nothing retries.
+      - name: One webhook, and it reaches ALL THREE titles
+        # All three subscribe to identity.user.deleted. A single endpoint routing it to one module
+        # answers 202 to a deletion two thirds of which never happened, and nothing retries.
         run: |
           grep -q 'readonly inbound?: readonly InboundSink\[\]' src/routes.ts \
             || { echo '::error::the fan-out is gone; identity.user.deleted would reach one title only'; exit 1; }
-          grep -q 'inbound: \[aetherholm.inbound\]' src/index.ts \
-            || { echo '::error::the composition root no longer wires the absorbed module into the webhook'; exit 1; }
-          # And the module drops its own copy of the route, so it cannot be silently shadowed.
+          grep -q 'inbound: \[aetherholm.inbound, nda.inbound\]' src/index.ts \
+            || { echo '::error::the composition root no longer wires every absorbed module into the webhook'; exit 1; }
+          # And each module drops its own copy of the route, so it cannot be silently shadowed.
           grep -q "'/v1/events'" src/aetherholm/module.ts \
-            || { echo '::error::the absorbed module no longer drops its shadowed /v1/events'; exit 1; }
+            || { echo '::error::the aetherholm module no longer drops its shadowed /v1/events'; exit 1; }
+          grep -q "'/v1/events'\]" src/nda/server.ts \
+            || { echo '::error::the nda module no longer drops its shadowed /v1/events'; exit 1; }
           echo 'ok: one verified webhook, fanned out to every subscribing module'
 
-      - name: The two job planes cannot be summed into one series
-        # Both titles register a job kind called `outbox.relay`, exactly. `jobs_pending` and
-        # `jobs_overdue` carry no kind at all, so an unlabelled write erases the other module's.
+      - name: The three job planes cannot be summed into one series
+        # All three titles register a job kind called `outbox.relay`, exactly, and emberkin and nda
+        # BOTH register `achievement.sweep` and `achievement.deliver` — two different games'
+        # bridges into two different worlds profiles. `jobs_pending` and `jobs_overdue` carry no
+        # kind at all, so an unlabelled write erases the other modules'.
         run: |
-          grep -q "withLabels({ module: MODULE_LABEL })" src/aetherholm/module.ts \
-            || { echo '::error::the absorbed module writes job metrics unlabelled; its queue depth would erase emberkin'"'"'s'; exit 1; }
+          for f in src/aetherholm/module.ts src/nda/module.ts; do
+            grep -q "withLabels({ module: MODULE_LABEL })" "$f" \
+              || { echo "::error::${f} writes job metrics unlabelled; its queue depth would erase the others"; exit 1; }
+          done
           grep -q "withLabels({ module: SERVICE })" src/index.ts \
-            || { echo '::error::the host writes job metrics unlabelled; its queue depth would erase the absorbed module'"'"'s'; exit 1; }
-          echo 'ok: both job planes are labelled by module'
+            || { echo '::error::the host writes job metrics unlabelled; its queue depth would erase the absorbed modules'"'"'s'; exit 1; }
+          echo 'ok: all three job planes are labelled by module'
+
+      - name: No absorbed module widens what this process can reach
+        # The merge argument for M3 was "aetherholm calls nothing"; for M4a it is "nda's peers are a
+        # SUBSET of emberkin's". `src/mergedupstreams.test.ts` measures it; this proves the
+        # measurement is still in the tree, because a deleted test is a silent widening.
+        run: |
+          [ -s src/mergedupstreams.test.ts ] \
+            || { echo '::error::the upstream-subset measurement is gone; a module could add a peer to this pod unnoticed'; exit 1; }
+          grep -q 'INBOUND_SIGNING_SECRET' src/mergedupstreams.test.ts \
+            || { echo '::error::the one-secret check lost its fixture; a module with its own signing variable would 403 on the shared webhook'; exit 1; }
+          echo 'ok: the upstream and signing-secret subsets are measured'
+
+      # ── THE ABSORBED nda MODULE'S OWN CONTROLS, PORTED AND REPOINTED (wave M4a) ─────────────
+      #
+      # Verbatim from micro-nda's own `rules` job, with every path moved under `src/nda/`. They are
+      # ported rather than left behind because that repository is not archived but is also no longer
+      # what ships: this image is. A guard that only runs where the code is not deployed is a guard
+      # that has stopped guarding.
+      - name: The absorbed world's constraints that keep one account to one survivor still exist
+        run: |
+          grep -q 'players_world_user_uniq' src/nda/migrations.ts \
+            || { echo '::error::the (world_id, user_id) unique index is gone; two tabs joining at once give one account two survivors'; exit 1; }
+          grep -q 'achievements_player_ach_uniq' src/nda/migrations.ts \
+            || { echo '::error::the achievement unique is gone; a re-evaluating tick can unlock one badge twice'; exit 1; }
+          grep -q 'tiles_world_xy_uniq' src/nda/migrations.ts \
+            || { echo '::error::a world can now hold two tiles at one coordinate'; exit 1; }
+
+      - name: A day resolution still refuses to write a day that has moved
+        # The defence that holds when the job lease does not — an expired lease under a slow
+        # resolution, an operator forcing a tick mid-sweep, a redelivered job. Without it, two
+        # workers resolve one day: double XP and double days-survived.
+        run: |
+          grep -q 'for update' /tmp/stripped/src/nda/worlds.ts \
+            || { echo '::error::persistDay no longer locks the world row'; exit 1; }
+          grep -q 'locked.day !== w.day' /tmp/stripped/src/nda/worlds.ts \
+            || { echo '::error::the day re-check is gone; two workers can resolve one day twice'; exit 1; }
+
+      - name: The absorbed resolution engine is still pure
+        # No database handle, no clock, no uuid. This is what makes "same seed and same inputs give
+        # a byte-identical resolution" assertable, and what the recorded ancestor corpus replays.
+        run: |
+          set -uo pipefail
+          bad=$(grep -nE "randomUUID|Date\.now|new Date\(|from 'postgres'" /tmp/stripped/src/nda/engine/*.ts || true)
+          bad="$bad$(grep -n 'Math\.random' /tmp/stripped/src/nda/engine/*.ts /tmp/stripped/src/nda/rules.ts || true)"
+          if [ -n "$(printf '%s' "$bad" | tr -d '[:space:]')" ]; then
+            echo '::error::the engine has acquired a clock, a uuid, a database or a Math.random:'
+            echo "$bad"
+            exit 1
+          fi
+          echo 'ok: the engine is pure'
+
+      - name: The ancestor conformance corpus is still present and still non-trivial
+        run: |
+          set -uo pipefail
+          for f in ancestor-corpus.json ancestor-maps.json ancestor-bots.json; do
+            [ -s "src/nda/fixtures/$f" ] || { echo "::error::src/nda/fixtures/$f is missing or empty"; exit 1; }
+          done
+          n=$(node -e 'process.stdout.write(String(require("./src/nda/fixtures/ancestor-corpus.json").length))')
+          [ "$n" -ge 18 ] || { echo "::error::the corpus has shrunk to $n recorded worlds"; exit 1; }
+          echo "ok: $n recorded worlds"
+
+      - name: The absorbed module still holds no money, and still has no ledger client
+        # This is the one guard the merge could have broken by ACCIDENT rather than by edit. The
+        # host DOES hold a ledger client, and folding a title that has never had one into that
+        # process must not give it one. There is no parameter through which emberkin's could arrive
+        # — `HostRuntime` names a registry, a verifier and two lifecycle functions — and this
+        # checks that nothing under src/nda/ ever names one directly either.
+        run: |
+          set -uo pipefail
+          if grep -nE '^\s+(balance|shards|held_amount|available|amount_[a-z]+|price)\s' src/nda/migrations.ts; then
+            echo '::error::a money column appeared in the absorbed schema; the ledger owns balances'
+            exit 1
+          fi
+          if grep -rlnE 'ledgerclient|LedgerClient|postEntry' /tmp/stripped/src/nda/ 2>/dev/null; then
+            echo '::error::a ledger client appeared under src/nda/; that title moves no value'
+            exit 1
+          fi
+          echo 'ok: no money in the absorbed title'
+
+      - name: Every mutating route of the absorbed module still declares an idempotency policy
+        run: |
+          grep -q 'defineMutation' /tmp/stripped/src/nda/server.ts \
+            || { echo '::error::defineMutation is gone; a mutating route can now be added with no idempotency'; exit 1; }
+          grep -q 'idempotency-key' /tmp/stripped/src/nda/server.ts \
+            || { echo '::error::no nda route requires an Idempotency-Key; a retry re-applies'; exit 1; }
+
+      - name: The absorbed module's standalone webhook still verifies a signature
+        # Its `POST /v1/events` is NOT mounted in this process — the host's is — but the route and
+        # its suite are kept, because `src/nda/server.test.ts` driving that listener is the only
+        # evidence the merge did not alter this title's own surface.
+        run: |
+          for needle in verifyDelivery SIGNATURE_HEADER bad_signature; do
+            grep -q "$needle" /tmp/stripped/src/nda/server.ts \
+              || { echo "::error::${needle} is gone from the absorbed module's inbound route"; exit 1; }
+          done
+
+      - name: The absorbed module's right to erasure still reaches its own database
+        # Two halves, and the second is the one the merge introduced. The topic must still be
+        # handled, AND the shared function that does the work must be reached through the module's
+        # own selector rather than through a handle the host could pass in.
+        run: |
+          grep -q 'identity.user.deleted' /tmp/stripped/src/nda/server.ts \
+            || { echo '::error::identity.user.deleted is no longer handled; this title stores user ids'; exit 1; }
+          grep -q 'applyInboundEvent' /tmp/stripped/src/nda/module.ts \
+            || { echo '::error::the module no longer applies inbound events; the host fan-out reaches nothing'; exit 1; }
+          grep -q 'ndaSql.for(network)' /tmp/stripped/src/nda/module.ts \
+            || { echo '::error::the inbound sink no longer resolves its OWN handle; an erasure could run against another title'"'"'s inbox'; exit 1; }
 
       - name: The service token is EXCHANGED, not held for the life of the process
         # micro-org #228. `servicetoken.test.ts` proves the refresh WORKS; this proves it is still

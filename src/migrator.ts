@@ -8,28 +8,29 @@
  * advisory lock derived from the service name, and the losers observe an empty pending set.
  *
  * ══════════════════════════════════════════════════════════════════════════════════════════════
- * **WAVE M3: TWO MODULES, TWO MIGRATION LEDGERS, AND WHY THEY CANNOT BE CONFUSED.**
+ * **WAVES M3 AND M4a: THREE MODULES, THREE MIGRATION LEDGERS, AND WHY THEY CANNOT BE CONFUSED.**
  *
- * This process now migrates emberkin's databases and aetherholm's. Both ledgers are a table called
- * `schema_migrations` — the name is a literal inside `@cloudsforge/db` and takes no option — so
- * the ONLY thing keeping emberkin's version 7 from being read as aetherholm's version 7 is that
- * they are in different DATABASES. Nothing about the merge changes that, and nothing may:
+ * This process now migrates emberkin's databases, aetherholm's and nda's. Every ledger is a table
+ * called `schema_migrations` — the name is a literal inside `@cloudsforge/db` and takes no option —
+ * so the ONLY thing keeping emberkin's version 6 from being read as nda's version 6 is that they
+ * are in different DATABASES. Nothing about the merge changes that, and nothing may:
  *
- *   * `EMBERKIN_DATABASE_URL` and `AETHERHOLM_DATABASE_URL` name different databases.
- *     `assertDistinct` below REFUSES to run if they do not, before a single statement is issued.
- *     That refusal is cheap and the alternative is not: the two schemas own SIX tables of the same
- *     name, so one shared database is two `create table seasons` racing, and then — because the
- *     ledger would already record the first module's version — the second module's tables never
- *     created at all, with a green migrator.
- *   * The `service` name each `migrate()` call passes is distinct (`emberkin` / `aetherholm`), so
- *     the two runs take DIFFERENT advisory locks and cannot serialise against each other. That is
- *     correct only because they are also in different databases; the assertion above is what makes
- *     it correct rather than lucky.
- *   * Neither module's `MIGRATIONS` array is imported by the other. Each is applied only to the
- *     DSNs of the module that declares it.
+ *   * `EMBERKIN_DATABASE_URL`, `AETHERHOLM_DATABASE_URL` and `NDA_DATABASE_URL` name different
+ *     databases. `assertDistinct` below REFUSES to run if they do not, before a single statement is
+ *     issued. That refusal is cheap and the alternative is not: FOUR table names — `outbox`,
+ *     `event_subscriptions`, `outbox_deliveries` and `inbox` — exist in all three schemas, and
+ *     emberkin and aetherholm share `seasons` and `battles` on top of that. One shared database is
+ *     two `create table inbox` racing, and then — because the ledger would already record the first
+ *     module's version — the later modules' tables never created at all, with a green migrator.
+ *   * The `service` name each `migrate()` call passes is distinct (`emberkin` / `aetherholm` /
+ *     `nda`), so the runs take DIFFERENT advisory locks and cannot serialise against each other.
+ *     That is correct only because they are also in different databases; the assertion above is
+ *     what makes it correct rather than lucky.
+ *   * No module's `MIGRATIONS` array is imported by another. Each is applied only to the DSNs of
+ *     the module that declares it.
  *
- * `migratortargets.test.ts` pins all three, and measures the six-table overlap rather than
- * asserting it.
+ * `migratortargets.test.ts` pins all three, and measures the table overlap rather than asserting
+ * it — including the fact that nda numbers its migrations from 1 exactly as the other two do.
  *
  * Every target still runs — the loop records a failure and carries on — so one run reports EVERY
  * database that is wrong. An operator who fixes one and rediscovers the next on the following
@@ -46,6 +47,7 @@ import { BASELINE_VERSION, MIGRATIONS } from './migrations.ts';
 // NOT reach for `./aetherholm/env.ts`: a second entry point holding a DSN it has no other reason
 // to hold is a hole, and this way the migrator cannot name one.
 import { aetherholmMigrationTargets } from './aetherholm/module.ts';
+import { ndaMigrationTargets } from './nda/module.ts';
 import { assertDistinct, type Target } from './migratortargets.ts';
 
 const log = new Logger({
@@ -81,8 +83,9 @@ const targets: readonly Target[] = [
         } satisfies Target,
       ]
     : []),
-  // The aetherholm module names its own, because only it may read its own configuration.
+  // Each mounted module names its own, because only it may read its own configuration.
   ...aetherholmMigrationTargets(),
+  ...ndaMigrationTargets(),
 ];
 
 // BEFORE ANY STATEMENT. Two modules pointed at one database is not a migration that fails halfway;

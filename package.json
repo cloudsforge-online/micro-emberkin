@@ -14,8 +14,9 @@
     "migrate": "node --import tsx src/migrator.ts",
     "typecheck": "tsc --noEmit",
     "_test": "--test-concurrency=1 is required, not a preference: every database test file truncates this service's tables between cases, and node:test runs FILES in parallel by default. A TRUNCATE takes an AccessExclusiveLock, so one file's reset deadlocks against another file's inserts (40P01). Cases within a file already run in order.",
-    "test": "node --import tsx --test --test-concurrency=1 src/*.test.ts src/aetherholm/*.test.ts",
-    "conformance": "node --import tsx --test --test-concurrency=1 src/conformance.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 src/*.test.ts src/aetherholm/*.test.ts src/nda/*.test.ts",
+    "_conformance": "Both titles that HAVE a recorded ancestor corpus replay it here. emberkin's replays a C#-recorded battle log; nda's replays a day-resolution corpus from the frozen ancestor. aetherholm has no ancestor and so has no entry.",
+    "conformance": "node --import tsx --test --test-concurrency=1 src/conformance.test.ts src/nda/conformance.test.ts",
     "verify": "node --import tsx scripts/verify.ts",
     "build": "tsc -p tsconfig.build.json",
     "check": "pnpm typecheck && pnpm test"

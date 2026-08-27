@@ -10,7 +10,7 @@
  *
  * `@cloudsforge/db` records applied migrations in a table called `schema_migrations`. The name is a
  * literal in that package and takes no option, so two modules migrating one database write into ONE
- * ledger keyed by `version` — and both modules number their migrations from 1.
+ * ledger keyed by `version` — and every module numbers its migrations from 1.
  *
  * The failure is not a crash. Whichever module runs first records versions 1..N; the second then
  * finds those rows and treats its OWN 1..N as already applied, so its tables are never created and
@@ -22,12 +22,12 @@
  * Nothing downstream can catch it, either: the advisory locks are derived from the SERVICE name and
  * the two names differ, so the two runs do not even serialise against each other.
  *
- * It is worse for THIS pair than it was for M1's. emberkin and aetherholm own six tables of the
- * same name — `outbox`, `event_subscriptions`, `outbox_deliveries`, `inbox`, `seasons` and
- * `battles` — so one shared database is not "two ledgers that confuse each other"; it is two
- * `create table seasons` racing, and then the second module's twenty-one tables never created at
- * all, with a green migrator. `migratortargets.test.ts` measures that overlap rather than
- * asserting it.
+ * It is worse for THESE modules than it was for M1's pair. FOUR table names — `outbox`,
+ * `event_subscriptions`, `outbox_deliveries` and `inbox` — exist in all three of this process's
+ * schemas WITH THE SAME COLUMNS, and emberkin and aetherholm own `seasons` and `battles` as well.
+ * So one shared database is not "two ledgers that confuse each other"; it is two `create table
+ * inbox` racing, and then the later module's tables never created at all, with a green migrator.
+ * `migratortargets.test.ts` measures that overlap rather than asserting it.
  *
  * So it is refused here, before a statement is issued, by comparing what a DSN actually addresses.
  * ══════════════════════════════════════════════════════════════════════════════════════════════
